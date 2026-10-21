@@ -1,0 +1,2 @@
+# Chaves de API do Google Gemini
+# Insira uma chave por linha (começam com AIzaSy...)

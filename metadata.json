@@ -1,0 +1,8 @@
+{
+  "name": "Motion Reel Studio Vercel_beta V1",
+  "description": "Estúdio inteligente de geração de showreels verticais animados em HTML5 Canvas e narração TTS com Gemini.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -254,7 +254,20 @@ const SC=D.scenes.map((s,i)=>{let fn=null,origem='fallback',layout=s.layout||'ce
   if(s.code){try{fn=compile(s.code);origem=s.origem||'gemini'}catch(e){fn=null;log('cena '+(i+1)+': erro de sintaxe -> fallback ('+e.message+')')}}
   if(!fn){fn=FB[s.fb]||FB.kinetic;layout=FBL[s.fb]||'centro'}
   return Object.assign({},s,{fn:fn,origem:origem,layout:layout,start:0})});
+
+SC.forEach(s=>{
+  const voiceAt=s.voice_at||0.45;
+  if(s.fala && D.voice !== 'none'){
+    const words = s.fala.split(/\s+/).filter(Boolean).length;
+    const puncts = (s.fala.match(/[,.;:!?—]/g) || []).length;
+    const minNeeded = voiceAt + (words * 0.45) + (puncts * 0.35) + 0.85;
+    if(s.dur < minNeeded){
+      s.dur = Math.round(minNeeded * 10) / 10;
+    }
+  }
+});
 let _acc=0;SC.forEach(s=>{s.start=_acc;_acc+=s.dur});
+let DUR=_acc;
 
 function degrade(i,e){const s=SC[i];log('cena '+(i+1)+': '+(e&&e.message||e)+' -> fallback');s.fn=FB[s.fb]||FB.kinetic;s.origem='fallback';s.layout=FBL[s.fb]||'centro'}
 function pulseAt(gt){const f=(gt*BPM/60)%1;return Math.pow(1-f,4)*(.35+.13*EN)}
@@ -289,10 +302,21 @@ function decodeVoices(){
       const bin=atob(s.audio),u=new Uint8Array(bin.length);
       for(let k=0;k<bin.length;k++)u[k]=bin.charCodeAt(k);
       VB[i]=await AC.decodeAudioData(u.buffer.slice(0));
+      if(VB[i] && VB[i].duration){
+        const voiceAt = s.voice_at || 0.45;
+        const minNeeded = voiceAt + VB[i].duration + 0.75;
+        if(s.dur < minNeeded){
+          s.dur = Math.round(minNeeded * 10) / 10;
+        }
+      }
     }catch(e){
       log('voz cena '+(i+1)+': decodificação de áudio ('+e.message+')');
     }
-  }));
+  })).then(()=>{
+    let acc=0;SC.forEach(s=>{s.start=acc;acc+=s.dur});
+    DUR=acc;
+    D.duration=acc;
+  });
 }
 
 function stopVoice(){
@@ -321,14 +345,19 @@ function startVoice(i,ts){
   // Fallback to Web Speech API if s.audio wasn't generated and text exists
   if(!muted && typeof window!=='undefined' && window.speechSynthesis && s.fala && D.voice!=='none'){
     try {
+      window.speechSynthesis.cancel();
       const u=new SpeechSynthesisUtterance(s.fala);
       u.lang='pt-BR';
-      u.rate=1.05;
+      u.rate=1.06;
       u.pitch=1.0;
       const vs=window.speechSynthesis.getVoices();
       const pt=vs.find(v=>v.lang&&v.lang.startsWith('pt')&&(v.name.includes('Natural')||v.name.includes('Google')||v.name.includes('Luciana')||v.name.includes('Felipe')))||vs.find(v=>v.lang&&v.lang.startsWith('pt'));
       if(pt)u.voice=pt;
-      window.speechSynthesis.speak(u);
+      setTimeout(()=>{
+        if(playing && voiceScene === i) {
+          window.speechSynthesis.speak(u);
+        }
+      }, Math.max(0, (at - ts) * 1000));
     }catch(e){}
   }
 }
@@ -637,6 +666,87 @@ async function callGeminiTTS(
 }
 
 // -------------------------------------------------------------
+// Voice Duration & Audio Envelope Calculation Helpers
+// -------------------------------------------------------------
+function estimateSpeechDuration(text: string): number {
+  if (!text || !text.trim()) return 3.8;
+  const words = text.trim().split(/\s+/).filter(Boolean).length;
+  const puncts = (text.match(/[,.;:!?—]/g) || []).length;
+  // Natural spoken pace in Brazilian Portuguese: ~130 words per minute (~0.46s per word)
+  // Natural pause at commas/periods: ~0.35s
+  // Pre-roll (voice_at): 0.45s
+  // Post-roll breathing buffer so sentence reverberates naturally before scene transition: 0.85s
+  const estimated = 0.45 + (words * 0.46) + (puncts * 0.35) + 0.85;
+  return Math.max(4.0, Math.ceil(estimated * 10) / 10);
+}
+
+async function getAudioDurationAndEnvelope(base64Wav: string): Promise<{ duration: number; env?: number[] }> {
+  try {
+    const bin = atob(base64Wav);
+    const len = bin.length;
+    const u = new Uint8Array(len);
+    for (let k = 0; k < len; k++) u[k] = bin.charCodeAt(k);
+
+    // Try Web Audio API in browser
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (AudioCtx) {
+      const actx = new AudioCtx();
+      try {
+        const audioBuf = await actx.decodeAudioData(u.buffer.slice(0));
+        const duration = audioBuf.duration;
+
+        // Compute 25-fps volume envelope so animation pulses with speech
+        const data = audioBuf.getChannelData(0);
+        const sampleRate = audioBuf.sampleRate;
+        const fps = 25;
+        const samplesPerFrame = Math.floor(sampleRate / fps);
+        const totalFrames = Math.floor(data.length / samplesPerFrame);
+        const env: number[] = [];
+
+        for (let f = 0; f < totalFrames; f++) {
+          let sum = 0;
+          const start = f * samplesPerFrame;
+          const end = Math.min(data.length, start + samplesPerFrame);
+          for (let s = start; s < end; s += 4) {
+            sum += Math.abs(data[s]);
+          }
+          const avg = sum / Math.max(1, (end - start) / 4);
+          env.push(Math.min(100, Math.round(avg * 320)));
+        }
+
+        actx.close().catch(() => {});
+        return { duration, env };
+      } catch (err) {
+        actx.close().catch(() => {});
+      }
+    }
+
+    // Fallback: parse WAV header directly
+    if (len > 44) {
+      const sampleRate = u[24] | (u[25] << 8) | (u[26] << 16) | (u[27] << 24);
+      const byteRate = u[28] | (u[29] << 8) | (u[30] << 16) | (u[31] << 24);
+      if (byteRate > 0) {
+        const duration = (len - 44) / byteRate;
+        return { duration };
+      }
+      if (sampleRate > 0) {
+        const channels = u[22] | (u[23] << 8) || 1;
+        const bitsPerSample = u[34] | (u[35] << 8) || 16;
+        const bytesPerSec = sampleRate * channels * (bitsPerSample / 8);
+        if (bytesPerSec > 0) {
+          const duration = (len - 44) / bytesPerSec;
+          return { duration };
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('Erro ao decodificar duração do áudio:', e);
+  }
+
+  return { duration: 0 };
+}
+
+// -------------------------------------------------------------
 // Generation Pipeline Functions
 // -------------------------------------------------------------
 export interface ReelGeneratorOptions {
@@ -713,7 +823,7 @@ export async function generateReelClientSide(
   onEvent({ step: 'script_start', message: 'Criando roteiro e coreografia com Gemini...' });
 
   const scriptPrompt = `Você é um diretor sênior de motion design e showreels verticais 9:16.
-Crie um roteiro de showreel dinâmico com 6 a 8 cenas para o seguinte briefing:
+Crie um roteiro de showreel dinâmico com 5 a 7 cenas para o seguinte briefing:
 "${prompt}"
 
 Estilo visual: ${dna.estilo} (${dna.estilo_desc}).
@@ -723,11 +833,11 @@ Para cada cena, responda em JSON com:
 - "text": Título curto de impacto em português (máx 5 palavras, maiúsculas)
 - "sub": Subtítulo curto em português (máx 10 palavras)
 - "idea": Descrição visual da animação (o que se move, formas, fundo, destaque)
-- "duracao": Duração de 2.5 a 4.5 segundos
-- "fala": Fala conversacional de 1 a 2 frases para narração
+- "duracao": Duração necessária para a narração ser falada por completo com clareza e ritmo natural (estime entre 4.0 e 7.5 segundos por cena)
+- "fala": Fala conversacional completa, fluida e natural de 1 a 2 frases para narração humana (o roteiro falado de cada cena)
 
 Responda APENAS com JSON:
-{"title":"...","motivo":"...","scenes":[{"role":"hook","text":"...","sub":"...","idea":"...","duracao":3.5,"fala":"..."}]}`;
+{"title":"...","motivo":"...","scenes":[{"role":"hook","text":"...","sub":"...","idea":"...","duracao":4.8,"fala":"..."}]}`;
 
   let plan: any = null;
   const scriptRaw = await callGeminiProxy(options.keys, scriptPrompt, { json: true, temperature: 0.9 }, onLog);
@@ -752,25 +862,35 @@ Responda APENAS com JSON:
       title: `${kw1} Showreel`,
       motivo: 'Formas geométricas e anéis de dados que pulsam com a batida',
       scenes: [
-        { role: 'hook', text: kw1, sub: 'Uma nova visão de movimento', idea: 'Letras surgindo com explosão de partículas e linhas com glow neon', duracao: 3.5, fala: `${kw1}. Uma nova visão de movimento.` },
-        { role: 'body', text: kw2, sub: 'Potência máxima e controle', idea: 'Túnel 3D com dados acelerando em direção à câmera', duracao: 3.0, fala: `${kw2}. Potência máxima e controle visual.` },
-        { role: 'body', text: 'DESIGN FLUIDO', sub: 'Geometria adaptativa inteligente', idea: 'Grade digital pulsando em sincronia com o ritmo', duracao: 3.2, fala: 'Design fluido com geometria adaptativa inteligente.' },
-        { role: 'climax', text: kw3, sub: 'Impacto total em cada detalhe', idea: 'Cubo 3D wireframe girando com glow e anéis orbitais', duracao: 3.5, fala: `${kw3}. Impacto total em cada detalhe.` },
-        { role: 'closing', text: 'EXPERIMENTE AGORA', sub: 'Motion Reel Studio', idea: 'Card final com anel luminoso e assinatura elegante', duracao: 3.0, fala: 'Experimente agora com Motion Reel Studio.' }
+        { role: 'hook', text: kw1, sub: 'Uma nova visão de movimento', idea: 'Letras surgindo com explosão de partículas e linhas com glow neon', duracao: 4.8, fala: `${kw1}. Uma nova visão de movimento para os seus projetos.` },
+        { role: 'body', text: kw2, sub: 'Potência máxima e controle', idea: 'Túnel 3D com dados acelerando em direção à câmera', duracao: 4.5, fala: `${kw2}. Potência máxima e controle visual de ponta a ponta.` },
+        { role: 'body', text: 'DESIGN FLUIDO', sub: 'Geometria adaptativa inteligente', idea: 'Grade digital pulsando em sincronia com o ritmo', duracao: 4.6, fala: 'Design fluido com geometria adaptativa e animações ultrarrápidas.' },
+        { role: 'climax', text: kw3, sub: 'Impacto total em cada detalhe', idea: 'Cubo 3D wireframe girando com glow e anéis orbitais', duracao: 5.0, fala: `${kw3}. Impacto total em cada detalhe para prender a atenção do público.` },
+        { role: 'closing', text: 'EXPERIMENTE AGORA', sub: 'Motion Reel Studio', idea: 'Card final com anel luminoso e assinatura elegante', duracao: 4.5, fala: 'Experimente agora com Motion Reel Studio e transforme suas ideias.' }
       ]
     };
   }
 
-  const rawScenes: SceneData[] = plan.scenes.map((s: any, idx: number) => ({
-    role: s.role || (idx === 0 ? 'hook' : idx === plan.scenes.length - 1 ? 'closing' : 'body'),
-    text: (s.text || 'MOTION').slice(0, 40),
-    sub: (s.sub || '').slice(0, 90),
-    dur: Math.max(2, Math.min(6, parseFloat(s.duracao) || 3.2)),
-    idea: s.idea || '',
-    fala: s.fala || '',
-    layout: idx === plan.scenes.length - 1 ? 'centro' : (['arte_cima', 'texto_cima', 'meio', 'centro'][idx % 4]),
-    fb: ['kinetic', 'burst', 'tunnel', 'grid', 'orbit', 'cube'][idx % 6]
-  }));
+  const rawScenes: SceneData[] = plan.scenes.map((s: any, idx: number) => {
+    const speechText = (s.fala || `${s.text}. ${s.sub}`).trim();
+    const neededSpeechDur = estimateSpeechDuration(speechText);
+    const parsedDur = parseFloat(s.duracao) || 4.0;
+    // Guarantee scene duration accommodates full spoken sentence
+    const initialDur = Math.max(parsedDur, neededSpeechDur);
+
+    return {
+      role: s.role || (idx === 0 ? 'hook' : idx === plan.scenes.length - 1 ? 'closing' : 'body'),
+      text: (s.text || 'MOTION').slice(0, 40),
+      sub: (s.sub || '').slice(0, 90),
+      dur: initialDur,
+      idea: s.idea || '',
+      fala: speechText,
+      voice_at: 0.45,
+      sub_at: Math.round((0.45 + initialDur * 0.4) * 10) / 10,
+      layout: idx === plan.scenes.length - 1 ? 'centro' : (['arte_cima', 'texto_cima', 'meio', 'centro'][idx % 4]),
+      fb: ['kinetic', 'burst', 'tunnel', 'grid', 'orbit', 'cube'][idx % 6]
+    };
+  });
 
   const totalDuration = rawScenes.reduce((acc, sc) => acc + sc.dur, 0);
 
@@ -805,11 +925,43 @@ Responda APENAS com JSON:
       const audioBase64 = await callGeminiTTS(options.keys, speechText, options.voice, onLog);
       if (audioBase64) {
         sc.audio = audioBase64;
-        onLog(`🎙️ Áudio da cena ${i + 1}/${rawScenes.length} sintetizado com sucesso (${options.voice})`);
+        
+        // Exact audio duration & volume envelope calculation
+        const { duration: audioDur, env } = await getAudioDurationAndEnvelope(audioBase64);
+        if (audioDur > 0) {
+          sc.audio_dur = Math.round(audioDur * 100) / 100;
+          if (env && env.length) sc.env = env;
+
+          // Scene duration MUST allow voice_at + full audio duration + natural breathing buffer (0.8s)
+          const voiceAt = sc.voice_at || 0.45;
+          const minSceneDur = Math.ceil((voiceAt + audioDur + 0.8) * 10) / 10;
+          if (sc.dur < minSceneDur) {
+            sc.dur = minSceneDur;
+          }
+          sc.sub_at = Math.round((voiceAt + Math.min(audioDur * 0.45, 2.0)) * 10) / 10;
+          onLog(`🎙️ Cena ${i + 1}/${rawScenes.length}: áudio de ${audioDur.toFixed(1)}s sincronizado (duração total da cena: ${sc.dur}s)`);
+        } else {
+          onLog(`🎙️ Áudio da cena ${i + 1}/${rawScenes.length} sintetizado (${options.voice})`);
+        }
       } else {
-        onLog(`Cena ${i + 1}: narração pronta via sintetizador vocal em português.`);
+        // Fallback to Web Speech API: guarantee duration for speech
+        const neededDur = estimateSpeechDuration(speechText);
+        if (sc.dur < neededDur) {
+          sc.dur = neededDur;
+        }
+        onLog(`Cena ${i + 1}: narração completa calibrada para ${sc.dur}s.`);
       }
     }
+
+    // Recalculate total duration based on all synchronized audio
+    const synchronizedTotalDuration = rawScenes.reduce((acc, sc) => acc + sc.dur, 0);
+    onEvent({
+      step: 'voice_done',
+      message: `Narração completa sincronizada com as cenas (${rawScenes.length} cenas, ${synchronizedTotalDuration.toFixed(1)}s)`,
+      scenes: rawScenes,
+      total_duration: synchronizedTotalDuration
+    });
+    onLog(`🎙️ Roteiro de todas as cenas calibrado para narração completa: ${synchronizedTotalDuration.toFixed(1)}s no total`);
   }
 
   // 3. Generate Scenes Canvas Code

@@ -137,7 +137,7 @@ export const SceneInspector: React.FC<SceneInspectorProps> = ({ scenes, title, m
                           </span>
                           {scene.audio && (
                             <span className="text-[9px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded font-normal normal-case">
-                              ✓ Áudio WAV Sincronizado
+                              ✓ Áudio Sincronizado {scene.audio_dur ? `(${scene.audio_dur.toFixed(1)}s)` : ''}
                             </span>
                           )}
                         </span>

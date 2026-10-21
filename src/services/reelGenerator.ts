@@ -198,6 +198,164 @@ M.sub=(ctx,W,H,P,ts)=>{const s=String(P.sub||'').trim();if(!s)return;const a=M.p
     long=L.reduce((x,y)=>x.length>y.length?x:y,''),sz=Math.min(M.fit(ctx,long,z.w,W*.045,600),z.h*1.15/(L.length*1.2)),lh=sz*1.22;
   L.forEach((l,i)=>M.text(ctx,l,W/2,z.cy+(i-(L.length-1)/2)*lh+(1-a)*20,sz,{color:P.pal.dim,alpha:a,weight:600}))};
 
+M.speechCard=(ctx,W,H,P,ts,sc)=>{
+  const speechText=String(sc.fala||P.say||sc.sub||'').trim();
+  if(!speechText)return;
+  const voiceAt=sc.voice_at||0.45;
+  const introP=M.p(ts,Math.max(0,voiceAt-0.25),0.45);
+  if(introP<=0)return;
+  const easeIntro=M.ease.outBack(introP);
+  const outroP=ts>sc.dur-0.3?1-M.p(ts,sc.dur-0.3,0.3):1;
+  const alpha=introP*outroP;
+  if(alpha<=0.01)return;
+
+  ctx.save();
+  ctx.globalAlpha=M.clamp(alpha);
+
+  const cardW=Math.round(W*0.90);
+  const cardX=Math.round((W-cardW)/2);
+  const cardPadX=Math.round(W*0.04);
+  const cardPadY=Math.round(H*0.015);
+
+  const words=speechText.split(/\s+/).filter(Boolean);
+  const maxTextW=cardW-cardPadX*2;
+
+  let fontSize=Math.round(Math.min(W*0.040,26));
+  if(words.length>22)fontSize=Math.round(Math.min(W*0.034,22));
+  if(words.length>36)fontSize=Math.round(Math.min(W*0.029,18));
+
+  const fontFam=D.dna.fonte&&D.dna.fonte.stack||M.font;
+  ctx.font='600 '+fontSize+'px '+fontFam;
+
+  const lines=[];
+  let curLine=[];
+  let curLineWidth=0;
+  const spaceW=ctx.measureText(' ').width;
+
+  words.forEach((w,wIdx)=>{
+    const wWidth=ctx.measureText(w).width;
+    if(curLine.length>0&&curLineWidth+spaceW+wWidth>maxTextW){
+      lines.push({words:curLine,width:curLineWidth});
+      curLine=[];
+      curLineWidth=0;
+    }
+    curLine.push({text:w,width:wWidth,idx:wIdx});
+    curLineWidth+=(curLine.length===1?0:spaceW)+wWidth;
+  });
+  if(curLine.length>0){
+    lines.push({words:curLine,width:curLineWidth});
+  }
+
+  const headerH=Math.round(fontSize*1.2);
+  const lineH=Math.round(fontSize*1.36);
+  const cardH=headerH+lines.length*lineH+cardPadY*2.2;
+  const cardY0=Math.round(H*0.74);
+  const slideDy=(1-easeIntro)*45;
+  const curCardY=Math.max(H*0.08,Math.min(H*0.95-cardH,cardY0+slideDy));
+
+  // 1. Draw Glassmorphism Container
+  ctx.save();
+  M.rrect(ctx,cardX,curCardY,cardW,cardH,18);
+  ctx.fillStyle='rgba(6,7,12,0.88)';
+  ctx.fill();
+  ctx.lineWidth=2;
+  ctx.strokeStyle=M.col(P.pal.acc,0.45+0.3*(P.pulse||0));
+  ctx.stroke();
+
+  // Top Neon Line Accent
+  ctx.fillStyle=P.pal.acc;
+  ctx.fillRect(cardX+cardPadX,curCardY+2,Math.min(cardW*0.4,120),2.5);
+  ctx.restore();
+
+  // 2. Draw Top Bar with Badge & Equalizer
+  const headY=curCardY+cardPadY+fontSize*0.35;
+  ctx.save();
+  const badgeText='ROTEIRO DA CENA';
+  ctx.font='800 '+Math.round(fontSize*0.50)+'px '+fontFam;
+  const badgeW=ctx.measureText(badgeText).width+16;
+  const badgeH=fontSize*0.8;
+  M.rrect(ctx,cardX+cardPadX,headY-badgeH*0.5,badgeW,badgeH,5);
+  ctx.fillStyle=M.col(P.pal.acc,0.22);
+  ctx.fill();
+  ctx.strokeStyle=M.col(P.pal.acc,0.6);
+  ctx.lineWidth=1;
+  ctx.stroke();
+  ctx.fillStyle=P.pal.acc;
+  ctx.textAlign='left';
+  ctx.textBaseline='middle';
+  ctx.fillText(badgeText,cardX+cardPadX+8,headY);
+
+  // Equalizer visualizer bars
+  const eqX=cardX+cardPadX+badgeW+12;
+  const isSpeakingNow=(curV&&curV.active)||(typeof window!=='undefined'&&window.speechSynthesis&&window.speechSynthesis.speaking);
+  const voiceEnergy=isSpeakingNow?Math.max(0.4,P.voice||0.6):0.15;
+  const barW=3,barGap=3;
+  for(let b=0;b<5;b++){
+    const barPhase=ts*14+b*1.5;
+    const barHeight=Math.max(3,(4+Math.sin(barPhase)*9*voiceEnergy+(b%2?4:0)));
+    ctx.fillStyle=M.col(b%2?P.pal.acc:P.pal.acc2,0.85);
+    ctx.fillRect(eqX+b*(barW+barGap),headY-barHeight/2,barW,barHeight);
+  }
+
+  // Scene indicator on right
+  const sceneIndicator='Cena '+(sc.role?sc.role.toUpperCase():'');
+  ctx.font='600 '+Math.round(fontSize*0.50)+'px '+fontFam;
+  ctx.fillStyle=P.pal.dim;
+  ctx.textAlign='right';
+  ctx.fillText(sceneIndicator,cardX+cardW-cardPadX,headY);
+  ctx.restore();
+
+  // 3. Kinetic Word Highlights (Karaoke style)
+  const textStartY=curCardY+cardPadY+headerH+fontSize*0.55;
+  const speechDur=Math.max(0.8,(sc.audio_dur||(sc.dur-voiceAt-0.5)));
+  const speechElapsed=Math.max(0,ts-voiceAt);
+  const speechProg=M.clamp(speechElapsed/speechDur);
+  const activeWordGlobalIdx=Math.floor(speechProg*words.length);
+
+  ctx.save();
+  ctx.font='600 '+fontSize+'px '+fontFam;
+  ctx.textBaseline='middle';
+
+  lines.forEach((line,lIdx)=>{
+    let wordX=cardX+cardPadX;
+    const wordY=textStartY+lIdx*lineH;
+
+    line.words.forEach((wObj)=>{
+      const isPast=wObj.idx<activeWordGlobalIdx;
+      const isCurrent=wObj.idx===activeWordGlobalIdx&&speechProg<0.99;
+
+      if(isCurrent){
+        ctx.save();
+        const padX=4,padY=2;
+        M.rrect(ctx,wordX-padX,wordY-fontSize*0.55-padY,wObj.width+padX*2,fontSize*1.1+padY*2,5);
+        ctx.fillStyle=M.col(P.pal.acc,0.30);
+        ctx.fill();
+        ctx.strokeStyle=P.pal.acc;
+        ctx.lineWidth=1;
+        ctx.stroke();
+
+        ctx.font='800 '+Math.round(fontSize*1.04)+'px '+fontFam;
+        ctx.fillStyle='#ffffff';
+        ctx.shadowColor=P.pal.acc;
+        ctx.shadowBlur=12;
+        ctx.fillText(wObj.text,wordX,wordY);
+        ctx.restore();
+      } else if(isPast){
+        ctx.fillStyle='rgba(255,255,255,0.95)';
+        ctx.fillText(wObj.text,wordX,wordY);
+      } else {
+        ctx.fillStyle='rgba(235,235,245,0.40)';
+        ctx.fillText(wObj.text,wordX,wordY);
+      }
+
+      wordX+=wObj.width+spaceW;
+    });
+  });
+
+  ctx.restore();
+  ctx.restore();
+};
+
 /* ====================== cenas prontas (fallback) ====================== */
 const FB={},FBL={cube:'arte_cima'};
 FB.kinetic=(ctx,t,ts,W,H,P,M)=>{M.deco(ctx,W,H,P,ts);const R=M.rng(P.seed),dir=R()<.5?-1:1,z=P.zones.main;
@@ -287,13 +445,25 @@ function paint(c,i,ts,gt,strict){
   M.bg(c,W,H,P,i);
   try{runScene(c,s,ts,gt,P)}
   catch(e){if(strict)throw e;degrade(i,e);resetCtx(c);M._boxes.length=0;P=mkP(s,i,gt,ts);M.bg(c,W,H,P,i);runScene(c,s,ts,gt,P)}
-  try{M.sub(c,W,H,P,ts)}catch(e){}
+  try{M.speechCard(c,W,H,P,ts,s)}catch(e){}
 }
 
 /* ====================== Motor de áudio (batida sintetizada + narração TTS humana) ====================== */
 let AC=null,master=null,beatG=null,vG=null,adest=null,muted=false,playing=false,gt=0,t0=0,lastHalf=-1,voiceScene=-1,needVoice=true;
-let VB=[],voicesReady=null,curV=null;
+let VB=[],voicesReady=null,curV=null,speechActive=false,lastNow=performance.now();
 let mr=null,chunks=[],recording=false,mimeT='';
+
+function isVoiceActive(sceneIdx){
+  if(curV && curV.scene===sceneIdx && curV.active){
+    if(AC && curV.endTime && AC.currentTime < curV.endTime - 0.04){
+      return true;
+    }
+  }
+  if(speechActive && typeof window!=='undefined' && window.speechSynthesis && window.speechSynthesis.speaking && voiceScene===sceneIdx){
+    return true;
+  }
+  return false;
+}
 
 function decodeVoices(){
   return Promise.all(SC.map(async(s,i)=>{
@@ -320,7 +490,8 @@ function decodeVoices(){
 }
 
 function stopVoice(){
-  if(curV){try{curV.src.stop()}catch(e){}curV=null}
+  if(curV){try{curV.src.stop()}catch(e){}curV.active=false;curV=null}
+  speechActive=false;
   if(typeof window!=='undefined'&&window.speechSynthesis)window.speechSynthesis.cancel();
 }
 
@@ -337,8 +508,12 @@ function startVoice(i,ts){
     src.buffer=buf;
     src.connect(vG);
     const when=AC.currentTime+Math.max(0,at-ts),offset=Math.max(0,ts-at);
+    const playDur=buf.duration-offset;
     src.start(when,offset);
-    curV={src:src,scene:i};
+    curV={src:src,scene:i,active:true,endTime:when+playDur};
+    src.onended=()=>{
+      if(curV&&curV.src===src){curV.active=false}
+    };
     return;
   }
 
@@ -348,17 +523,25 @@ function startVoice(i,ts){
       window.speechSynthesis.cancel();
       const u=new SpeechSynthesisUtterance(s.fala);
       u.lang='pt-BR';
-      u.rate=1.06;
+      u.rate=1.05;
       u.pitch=1.0;
       const vs=window.speechSynthesis.getVoices();
       const pt=vs.find(v=>v.lang&&v.lang.startsWith('pt')&&(v.name.includes('Natural')||v.name.includes('Google')||v.name.includes('Luciana')||v.name.includes('Felipe')))||vs.find(v=>v.lang&&v.lang.startsWith('pt'));
       if(pt)u.voice=pt;
+
+      speechActive=true;
+      u.onstart=()=>{speechActive=true};
+      u.onend=()=>{speechActive=false};
+      u.onerror=()=>{speechActive=false};
+
       setTimeout(()=>{
         if(playing && voiceScene === i) {
           window.speechSynthesis.speak(u);
         }
       }, Math.max(0, (at - ts) * 1000));
-    }catch(e){}
+    }catch(e){
+      speechActive=false;
+    }
   }
 }
 
@@ -412,8 +595,28 @@ function frame(t){
 
 let lastScene=-1;
 function tick(now){
+  const dt = Math.max(0, Math.min(0.1, (now - lastNow) / 1000));
+  lastNow = now;
+
   if(playing){
     gt=(now-t0)/1000;
+
+    // Guaranteed speech completion: never switch scene if narration is still actively speaking!
+    const curIdx = frame(gt);
+    const curSc = SC[curIdx];
+    const sceneEnd = curSc.start + curSc.dur;
+
+    if(gt >= sceneEnd - 0.08 && isVoiceActive(curIdx)){
+      curSc.dur += dt;
+      for(let k = curIdx + 1; k < SC.length; k++){
+        SC[k].start += dt;
+      }
+      DUR += dt;
+      D.duration = DUR;
+      gt = curSc.start + curSc.dur - 0.08;
+      t0 = now - gt * 1000;
+    }
+
     if(gt>=DUR){
       gt=0;t0=now;lastHalf=-1;
       stopVoice();
@@ -431,12 +634,11 @@ function tick(now){
       voiceScene=i;
       startVoice(i,gt-SC[i].start);
     }
-    const sv=SC[i],tv=gt-sv.start,buf=VB[i];
-    const isSpeaking=(buf&&tv>=(sv.voice_at||0.45)&&tv<(sv.voice_at||0.45)+buf.duration) || (typeof window!=='undefined'&&window.speechSynthesis&&window.speechSynthesis.speaking);
-    beatG.gain.setTargetAtTime(isSpeaking?.22:.8,AC.currentTime,.12);
+    const isSpeaking=isVoiceActive(i);
+    beatG.gain.setTargetAtTime(isSpeaking?.20:.8,AC.currentTime,.12);
   }
   lastScene=i;
-  $('hud').textContent=(recording?'● GRAVANDO  ':'')+gt.toFixed(1)+'s / '+DUR+'s  ·  cena '+(i+1)+'/'+SC.length+' ('+sc.origem+')'+(VB[i]?'  ·  🎙️ TTS':'');
+  $('hud').textContent=(recording?'● GRAVANDO  ':'')+gt.toFixed(1)+'s / '+DUR.toFixed(1)+'s  ·  cena '+(i+1)+'/'+SC.length+' ('+sc.origem+')'+(VB[i]?'  ·  🎙️ TTS':'');
   if(playing)$('seek').value=Math.round(gt/DUR*1000);
   requestAnimationFrame(tick);
 }

@@ -538,35 +538,51 @@ let curIdx=0,curTs=0,totalElapsed=0;
 let lastHalf=-1,voiceScene=-1,needVoice=true;
 let VB=[],voicesReady=null,curV=null,speechActive=false,lastNow=performance.now();
 let mr=null,chunks=[],recording=false,mimeT='';
+let _currentUtterance=null,speechFinishedAt=-1,activeSpeechScene=-1;
 
 function isVoiceActive(sceneIdx){
   if(curV && curV.scene===sceneIdx && curV.active){
-    if(AC && curV.endTime && AC.currentTime < curV.endTime - 0.04){
+    if(AC && curV.endTime && AC.currentTime < curV.endTime + 0.1){
       return true;
     }
   }
-  if(speechActive && typeof window!=='undefined' && window.speechSynthesis && window.speechSynthesis.speaking && voiceScene===sceneIdx){
-    return true;
+  if(activeSpeechScene === sceneIdx){
+    if(speechActive){
+      return true;
+    }
+    if(typeof window!=='undefined' && window.speechSynthesis && window.speechSynthesis.speaking){
+      return true;
+    }
+    if(speechFinishedAt > 0 && (performance.now() - speechFinishedAt) < 700){
+      return true;
+    }
   }
   return false;
 }
 
 function decodeVoices(){
   return Promise.all(SC.map(async(s,i)=>{
-    if(!s.audio)return;
-    try{
-      const bin=atob(s.audio),u=new Uint8Array(bin.length);
-      for(let k=0;k<bin.length;k++)u[k]=bin.charCodeAt(k);
-      VB[i]=await AC.decodeAudioData(u.buffer.slice(0));
-      if(VB[i] && VB[i].duration){
-        const voiceAt = s.voice_at || 0.45;
-        const minNeeded = voiceAt + VB[i].duration + 1.1;
-        if(s.dur < minNeeded){
-          s.dur = Math.round(minNeeded * 10) / 10;
+    if(s.audio){
+      try{
+        const bin=atob(s.audio),u=new Uint8Array(bin.length);
+        for(let k=0;k<bin.length;k++)u[k]=bin.charCodeAt(k);
+        VB[i]=await AC.decodeAudioData(u.buffer.slice(0));
+        if(VB[i] && VB[i].duration){
+          const voiceAt = s.voice_at || 0.50;
+          const exactSceneDur = Math.round((voiceAt + VB[i].duration + 1.5) * 10) / 10;
+          s.dur = Math.max(s.dur || 0, exactSceneDur);
+          s.audio_dur = VB[i].duration;
         }
+      }catch(e){
+        log('voz cena '+(i+1)+': decodificação de áudio ('+e.message+')');
       }
-    }catch(e){
-      log('voz cena '+(i+1)+': decodificação de áudio ('+e.message+')');
+    } else if(s.fala){
+      const words = s.fala.trim().split(/\s+/).filter(Boolean);
+      const puncts = (s.fala.match(/[,.;:!?—]/g) || []).length;
+      const longWords = words.filter(w=>w.length > 6).length;
+      const est = 0.50 + (words.length * 0.58) + (longWords * 0.18) + (puncts * 0.50) + 1.50;
+      const exactSceneDur = Math.max(5.5, Math.round(est * 10) / 10);
+      s.dur = Math.max(s.dur || 0, exactSceneDur);
     }
   })).then(()=>{
     let acc=0;SC.forEach(s=>{s.start=acc;acc+=s.dur});
@@ -578,7 +594,12 @@ function decodeVoices(){
 function stopVoice(){
   if(curV){try{curV.src.stop()}catch(e){}curV.active=false;curV=null}
   speechActive=false;
-  if(typeof window!=='undefined'&&window.speechSynthesis)window.speechSynthesis.cancel();
+  activeSpeechScene=-1;
+  speechFinishedAt=-1;
+  _currentUtterance=null;
+  if(typeof window!=='undefined'&&window.speechSynthesis){
+    try{window.speechSynthesis.cancel()}catch(e){}
+  }
 }
 
 function startVoice(i,ts){
@@ -586,8 +607,10 @@ function startVoice(i,ts){
   const s=SC[i];
   if(!s)return;
   voiceScene=i;
+  activeSpeechScene=i;
+  speechFinishedAt=-1;
   const buf=VB[i];
-  const at=s.voice_at||0.45;
+  const at=s.voice_at||0.50;
 
   if(AC&&buf){
     if(ts>=at+buf.duration)return;
@@ -599,7 +622,10 @@ function startVoice(i,ts){
     src.start(when,offset);
     curV={src:src,scene:i,active:true,endTime:when+playDur};
     src.onended=()=>{
-      if(curV&&curV.src===src){curV.active=false}
+      if(curV&&curV.src===src){
+        curV.active=false;
+        speechFinishedAt=performance.now();
+      }
     };
     return;
   }
@@ -609,23 +635,26 @@ function startVoice(i,ts){
     try {
       window.speechSynthesis.cancel();
       const u=new SpeechSynthesisUtterance(s.fala);
+      window._activeUtterance=u;
+      _currentUtterance=u;
       u.lang='pt-BR';
-      u.rate=1.02;
+      u.rate=0.98;
       u.pitch=1.0;
       const vs=window.speechSynthesis.getVoices();
-      const pt=vs.find(v=>v.lang&&v.lang.startsWith('pt')&&(v.name.includes('Natural')||v.name.includes('Google')||v.name.includes('Luciana')||v.name.includes('Felipe')))||vs.find(v=>v.lang&&v.lang.startsWith('pt'));
+      const pt=vs.find(v=>v.lang&&v.lang.startsWith('pt')&&(v.name.includes('Natural')||v.name.includes('Google')||v.name.includes('Luciana')||v.name.includes('Felipe')||v.name.includes('Francisca')||v.name.includes('Antonio')))||vs.find(v=>v.lang&&v.lang.startsWith('pt'));
       if(pt)u.voice=pt;
 
       speechActive=true;
       u.onstart=()=>{speechActive=true};
-      u.onend=()=>{speechActive=false};
-      u.onerror=()=>{speechActive=false};
+      u.onend=()=>{speechActive=false;speechFinishedAt=performance.now()};
+      u.onerror=()=>{speechActive=false;speechFinishedAt=performance.now()};
 
+      const delayMs=Math.max(50,Math.round((at-ts)*1000));
       setTimeout(()=>{
         if(playing && voiceScene === i) {
-          window.speechSynthesis.speak(u);
+          try{window.speechSynthesis.speak(u)}catch(e){speechActive=false}
         }
-      }, Math.max(0, (at - ts) * 1000));
+      }, delayMs);
     }catch(e){
       speechActive=false;
     }
@@ -688,7 +717,8 @@ function tick(now){
     // Guaranteed speech completion: never switch scene if narration is still actively speaking!
     if(curTs >= curSc.dur){
       if(isSpeaking){
-        curSc.dur = Math.max(curSc.dur, curTs + 0.6);
+        curSc.dur = Math.max(curSc.dur, curTs + 0.8);
+        DUR = SC.reduce((a, s) => a + s.dur, 0);
       } else {
         curIdx++;
         curTs = 0;
@@ -817,7 +847,6 @@ async function saveHTML(){
   document.body.appendChild(a);a.click();a.remove();log('HTML completo salvo (download)');
 }
 $('bHtml').onclick=saveHTML;
-$('seek').oninput=e=>{pause();gt=e.target.value/1000*DUR};
 log('DNA: '+D.dna.estilo+' | '+D.dna.structure+' | '+D.dna.transition+' | '+BPM+' bpm | energia '+EN+' | tema '+(D.ui_nome||'-'));
 SC.forEach((s,i)=>log((i+1)+'. ['+s.role+'] '+s.text+'  ('+s.origem+', layout '+s.layout+', '+s.dur.toFixed(1)+'s)'));
 fitCanvas();requestAnimationFrame(tick);
@@ -975,14 +1004,19 @@ async function callGeminiTTS(
 // Voice Duration & Audio Envelope Calculation Helpers
 // -------------------------------------------------------------
 function estimateSpeechDuration(text: string): number {
-  if (!text || !text.trim()) return 4.5;
-  const words = text.trim().split(/\s+/).filter(Boolean).length;
-  const puncts = (text.match(/[,.;:!?—]/g) || []).length;
-  // Natural spoken pace with articulation in Brazilian Portuguese: ~0.50s per word + 0.40s per punctuation
-  // Pre-roll (voice_at): 0.45s
-  // Post-roll breathing room: 1.2s to ensure the sentence is NEVER cut off abruptly before the scene ends
-  const estimated = 0.45 + (words * 0.50) + (puncts * 0.40) + 1.2;
-  return Math.max(4.8, Math.ceil(estimated * 10) / 10);
+  if (!text || !text.trim()) return 5.5;
+  const clean = text.trim();
+  const words = clean.split(/\s+/).filter(Boolean);
+  const puncts = (clean.match(/[,.;:!?—]/g) || []).length;
+  const longWords = words.filter(w => w.length > 6).length;
+
+  // Natural spoken pace with articulation in Brazilian Portuguese: ~0.58s per word
+  // Additional pause for complex words: ~0.18s
+  // Breathing pause per punctuation: ~0.50s
+  // Pre-roll (voice_at): 0.50s
+  // Post-roll breathing room: 1.50s so the sentence is NEVER cut off abruptly before the scene ends
+  const estimated = 0.50 + (words.length * 0.58) + (longWords * 0.18) + (puncts * 0.50) + 1.50;
+  return Math.max(5.5, Math.ceil(estimated * 10) / 10);
 }
 
 export function detectSceneEmotion(text: string, fala: string, role?: string): { emoji: string; tag: string; color: string } {
@@ -1154,21 +1188,27 @@ export async function generateReelClientSide(
   onEvent({ step: 'script_start', message: 'Criando roteiro e coreografia com Gemini...' });
 
   const scriptPrompt = `Você é um diretor sênior de motion design e showreels verticais 9:16.
-Crie um roteiro de showreel dinâmico com 5 a 7 cenas para o seguinte briefing:
+Crie um roteiro de showreel dinâmico com 5 a 6 cenas para o seguinte briefing:
 "${prompt}"
 
 Estilo visual: ${dna.estilo} (${dna.estilo_desc}).
 Estrutura: ${dna.structure}, BPM: ${dna.bpm}.
+
+REGRA OBRIGATÓRIA DE TEMPO E SINCRONIA:
+O tempo da cena ("duracao") DEVE ser EXATAMENTE o tempo necessário para o roteiro falado ("fala") ser falado por completo com ritmo pausado, elegante e claro, sem correria.
+- "fala": Fala conversacional completa e direta de 1 a 2 frases para narração humana (entre 10 e 18 palavras).
+- "duracao": Duração EXATA em segundos para narrar essa fala completa (calcule entre 6.0 e 9.5 segundos por cena, compatível com o tamanho da fala).
+
 Para cada cena, responda em JSON com:
-- "role": "hook" (cena 1), "body" (cenas 2 a 5), "climax" (penúltima), "closing" (última cena)
+- "role": "hook" (cena 1), "body" (cenas 2 a 4), "climax" (penúltima), "closing" (última cena)
 - "text": Título curto de impacto em português (máx 5 palavras, maiúsculas)
-- "sub": Subtítulo curto em português (máx 10 palavras)
+- "sub": Subtítulo curto em português (máx 8 palavras)
 - "idea": Descrição visual da animação (o que se move, formas, fundo, destaque)
-- "duracao": Duração necessária para a narração ser falada por completo com clareza e ritmo natural (estime entre 4.0 e 7.5 segundos por cena)
-- "fala": Fala conversacional completa, fluida e natural de 1 a 2 frases para narração humana (o roteiro falado de cada cena)
+- "duracao": Duração calibrada da fala (ex: 6.8, 7.2, 8.0)
+- "fala": Roteiro falado completo da cena
 
 Responda APENAS com JSON:
-{"title":"...","motivo":"...","scenes":[{"role":"hook","text":"...","sub":"...","idea":"...","duracao":4.8,"fala":"..."}]}`;
+{"title":"...","motivo":"...","scenes":[{"role":"hook","text":"...","sub":"...","idea":"...","duracao":7.0,"fala":"..."}]}`;
 
   let plan: any = null;
   const scriptRaw = await callGeminiProxy(options.keys, scriptPrompt, { json: true, temperature: 0.9 }, onLog);
@@ -1193,11 +1233,11 @@ Responda APENAS com JSON:
       title: `${kw1} Showreel`,
       motivo: 'Formas geométricas e anéis de dados que pulsam com a batida',
       scenes: [
-        { role: 'hook', text: kw1, sub: 'Uma nova visão de movimento', idea: 'Letras surgindo com explosão de partículas e linhas com glow neon', duracao: 4.8, fala: `${kw1}. Uma nova visão de movimento para os seus projetos.` },
-        { role: 'body', text: kw2, sub: 'Potência máxima e controle', idea: 'Túnel 3D com dados acelerando em direção à câmera', duracao: 4.5, fala: `${kw2}. Potência máxima e controle visual de ponta a ponta.` },
-        { role: 'body', text: 'DESIGN FLUIDO', sub: 'Geometria adaptativa inteligente', idea: 'Grade digital pulsando em sincronia com o ritmo', duracao: 4.6, fala: 'Design fluido com geometria adaptativa e animações ultrarrápidas.' },
-        { role: 'climax', text: kw3, sub: 'Impacto total em cada detalhe', idea: 'Cubo 3D wireframe girando com glow e anéis orbitais', duracao: 5.0, fala: `${kw3}. Impacto total em cada detalhe para prender a atenção do público.` },
-        { role: 'closing', text: 'EXPERIMENTE AGORA', sub: 'Motion Reel Studio', idea: 'Card final com anel luminoso e assinatura elegante', duracao: 4.5, fala: 'Experimente agora com Motion Reel Studio e transforme suas ideias.' }
+        { role: 'hook', text: kw1, sub: 'Uma nova visão de movimento', idea: 'Letras surgindo com explosão de partículas e linhas com glow neon', duracao: 6.8, fala: `${kw1}. Uma nova visão de movimento para os seus projetos.` },
+        { role: 'body', text: kw2, sub: 'Potência máxima e controle', idea: 'Túnel 3D com dados acelerando em direção à câmera', duracao: 6.5, fala: `${kw2}. Potência máxima e controle visual de ponta a ponta.` },
+        { role: 'body', text: 'DESIGN FLUIDO', sub: 'Geometria adaptativa inteligente', idea: 'Grade digital pulsando em sincronia com o ritmo', duracao: 6.6, fala: 'Design fluido com geometria adaptativa e animações ultrarrápidas.' },
+        { role: 'climax', text: kw3, sub: 'Impacto total em cada detalhe', idea: 'Cubo 3D wireframe girando com glow e anéis orbitais', duracao: 7.2, fala: `${kw3}. Impacto total em cada detalhe para prender a atenção do público.` },
+        { role: 'closing', text: 'EXPERIMENTE AGORA', sub: 'Motion Reel Studio', idea: 'Card final com anel luminoso e assinatura elegante', duracao: 6.5, fala: 'Experimente agora com Motion Reel Studio e transforme suas ideias.' }
       ]
     };
   }
@@ -1205,8 +1245,8 @@ Responda APENAS com JSON:
   const rawScenes: SceneData[] = plan.scenes.map((s: any, idx: number) => {
     const speechText = (s.fala || `${s.text}. ${s.sub}`).trim();
     const neededSpeechDur = estimateSpeechDuration(speechText);
-    const parsedDur = parseFloat(s.duracao) || 4.5;
-    // Guarantee scene duration accommodates full spoken sentence without hurry
+    const parsedDur = parseFloat(s.duracao) || 6.0;
+    // Set scene duration to the exact calibrated speech time
     const initialDur = Math.max(parsedDur, neededSpeechDur);
     const role = s.role || (idx === 0 ? 'hook' : idx === plan.scenes.length - 1 ? 'closing' : 'body');
     const emotion = detectSceneEmotion(s.text || '', speechText, role);
@@ -1218,8 +1258,8 @@ Responda APENAS com JSON:
       dur: initialDur,
       idea: s.idea || '',
       fala: speechText,
-      voice_at: 0.45,
-      sub_at: Math.round((0.45 + initialDur * 0.4) * 10) / 10,
+      voice_at: 0.50,
+      sub_at: Math.round((0.50 + initialDur * 0.4) * 10) / 10,
       layout: idx === plan.scenes.length - 1 ? 'centro' : (['arte_cima', 'texto_cima', 'meio', 'centro'][idx % 4]),
       fb: ['kinetic', 'burst', 'tunnel', 'grid', 'orbit', 'cube'][idx % 6],
       emotion
@@ -1266,25 +1306,22 @@ Responda APENAS com JSON:
           sc.audio_dur = Math.round(audioDur * 100) / 100;
           if (env && env.length) sc.env = env;
 
-          // Scene duration MUST allow voice_at + full audio duration + generous breathing buffer (1.2s)
-          // This guarantees that the speech is NEVER cut off mid-sentence
-          const voiceAt = sc.voice_at || 0.45;
-          const minSceneDur = Math.ceil((voiceAt + audioDur + 1.2) * 10) / 10;
-          if (sc.dur < minSceneDur) {
-            sc.dur = minSceneDur;
-          }
+          // The scene duration is strictly and directly set to:
+          // voice_at (0.50s) + exact audio duration + post-roll breathing room (1.50s)
+          // This guarantees that the scene duration equals the script speaking time!
+          const voiceAt = sc.voice_at || 0.50;
+          const exactSceneDur = Math.ceil((voiceAt + audioDur + 1.50) * 10) / 10;
+          sc.dur = exactSceneDur;
           sc.sub_at = Math.round((voiceAt + Math.min(audioDur * 0.45, 2.0)) * 10) / 10;
-          onLog(`🎙️ Cena ${i + 1}/${rawScenes.length}: áudio de ${audioDur.toFixed(1)}s sincronizado (duração total calibrada: ${sc.dur}s)`);
+          onLog(`🎙️ Cena ${i + 1}/${rawScenes.length}: áudio de ${audioDur.toFixed(1)}s sincronizado (tempo exato da cena: ${sc.dur}s)`);
         } else {
           onLog(`🎙️ Áudio da cena ${i + 1}/${rawScenes.length} sintetizado (${options.voice})`);
         }
       } else {
         // Fallback to Web Speech API: guarantee duration for speech
         const neededDur = estimateSpeechDuration(speechText);
-        if (sc.dur < neededDur) {
-          sc.dur = neededDur;
-        }
-        onLog(`Cena ${i + 1}: narração completa calibrada para ${sc.dur}s.`);
+        sc.dur = Math.max(sc.dur, neededDur);
+        onLog(`Cena ${i + 1}: tempo da cena calibrado exatamente com a fala (${sc.dur}s).`);
       }
     }
 

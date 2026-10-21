@@ -483,14 +483,34 @@ function frame(gt){
   if(f>0){ctx.fillStyle='rgba(0,0,0,'+M.clamp(f)+')';ctx.fillRect(0,0,W,H)}
   return i}
 
-/* ====================== áudio (batida sintetizada) ====================== */
-let AC=null,master=null,adest=null,nbuf=null,muted=false,beatG=null,vG=null,VB=[],voicesReady=null,curV=null,voiceScene=-1,needVoice=true;
-function decodeVoices(){return Promise.all(SC.map(async(s,i)=>{if(!s.audio)return;
-  try{const bin=atob(s.audio),u=new Uint8Array(bin.length);for(let k=0;k<bin.length;k++)u[k]=bin.charCodeAt(k);VB[i]=await AC.decodeAudioData(u.buffer)}
-  catch(e){log('voz da cena '+(i+1)+': não consegui decodificar o áudio')}}))}
-function stopVoice(){if(curV){try{curV.src.stop()}catch(e){}curV=null}}
-function startVoice(i,ts){stopVoice();const s=SC[i],buf=VB[i];if(!AC||!buf)return;const at=s.voice_at||0;if(ts>=at+buf.duration)return;
-  const src=AC.createBufferSource();src.buffer=buf;src.connect(vG);src.start(AC.currentTime+Math.max(0,at-ts),Math.max(0,ts-at));curV={src:src,scene:i}}
+/* ====================== áudio (batida sintetizada + voz humana) ====================== */
+let AC=null,master=null,adest=null,nbuf=null,muted=false,beatG=null,vG=null,VB=[],voicesReady=null,curV=null,curIdx=0,curTs=0,totalElapsed=0,lastHalf=-1,voiceScene=-1,speechActive=false,lastNow=performance.now();
+let _currentUtterance=null,speechFinishedAt=-1,activeSpeechScene=-1;
+function isVoiceActive(sceneIdx){
+  if(curV&&curV.scene===sceneIdx&&curV.active){if(AC&&curV.endTime&&AC.currentTime<curV.endTime+0.1)return true}
+  if(activeSpeechScene===sceneIdx){if(speechActive)return true;if(typeof window!=='undefined'&&window.speechSynthesis&&window.speechSynthesis.speaking)return true;if(speechFinishedAt>0&&(performance.now()-speechFinishedAt)<700)return true}
+  return false}
+function decodeVoices(){return Promise.all(SC.map(async(s,i)=>{
+  if(s.audio){
+    try{const bin=atob(s.audio),u=new Uint8Array(bin.length);for(let k=0;k<bin.length;k++)u[k]=bin.charCodeAt(k);VB[i]=await AC.decodeAudioData(u.buffer.slice(0));
+      if(VB[i]&&VB[i].duration){const at=s.voice_at||0.5;s.dur=Math.max(s.dur||0,Math.round((at+VB[i].duration+1.5)*10)/10);s.audio_dur=VB[i].duration;}}
+    catch(e){log('voz cena '+(i+1)+': decodificação de áudio')}
+  } else if(s.fala){
+    const words=s.fala.trim().split(/\s+/).filter(Boolean);const puncts=(s.fala.match(/[,.;:!?—]/g)||[]).length;const longW=words.filter(w=>w.length>6).length;
+    const est=0.50+(words.length*0.58)+(longW*0.18)+(puncts*0.50)+1.50;s.dur=Math.max(5.5,Math.round(est*10)/10);
+  }
+})).then(()=>{let acc=0;SC.forEach(s=>{s.start=acc;acc+=s.dur});DUR=acc;D.duration=acc;})}
+function stopVoice(){if(curV){try{curV.src.stop()}catch(e){}curV.active=false;curV=null}speechActive=false;activeSpeechScene=-1;speechFinishedAt=-1;_currentUtterance=null;if(typeof window!=='undefined'&&window.speechSynthesis){try{window.speechSynthesis.cancel()}catch(e){}}}
+function startVoice(i,ts){stopVoice();const s=SC[i];if(!s)return;voiceScene=i;activeSpeechScene=i;speechFinishedAt=-1;const buf=VB[i];const at=s.voice_at||0.5;
+  if(AC&&buf){if(ts>=at+buf.duration)return;const src=AC.createBufferSource();src.buffer=buf;src.connect(vG);
+    const when=AC.currentTime+Math.max(0,at-ts),offset=Math.max(0,ts-at),playDur=buf.duration-offset;src.start(when,offset);curV={src:src,scene:i,active:true,endTime:when+playDur};
+    src.onended=()=>{if(curV&&curV.src===src){curV.active=false;speechFinishedAt=performance.now()}};return}
+  if(!muted&&typeof window!=='undefined'&&window.speechSynthesis&&s.fala&&D.voice!=='none'){
+    try{window.speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(s.fala);window._activeUtterance=u;_currentUtterance=u;u.lang='pt-BR';u.rate=0.98;u.pitch=1.0;
+      const vs=window.speechSynthesis.getVoices();const pt=vs.find(v=>v.lang&&v.lang.startsWith('pt')&&(v.name.includes('Natural')||v.name.includes('Google')||v.name.includes('Luciana')||v.name.includes('Felipe')))||vs.find(v=>v.lang&&v.lang.startsWith('pt'));if(pt)u.voice=pt;
+      speechActive=true;u.onstart=()=>{speechActive=true};u.onend=()=>{speechActive=false;speechFinishedAt=performance.now()};u.onerror=()=>{speechActive=false;speechFinishedAt=performance.now()};
+      setTimeout(()=>{if(playing&&voiceScene===i){try{window.speechSynthesis.speak(u)}catch(e){speechActive=false}}},Math.max(50,Math.round((at-ts)*1000)));
+    }catch(e){speechActive=false}}}
 function initAudio(){if(AC)return;
   AC=new (window.AudioContext||window.webkitAudioContext)();master=AC.createGain();master.gain.value=muted?0:.9;
   adest=AC.createMediaStreamDestination();master.connect(AC.destination);master.connect(adest);
@@ -508,24 +528,33 @@ function whoosh(){const t=AC.currentTime,s=AC.createBufferSource(),f=AC.createBi
   s.connect(f);f.connect(g);g.connect(beatG);s.start(t);s.stop(t+.4)}
 
 /* ====================== player ====================== */
-let playing=false,gt=0,t0=0,lastHalf=-1,lastScene=-1,recording=false,mr=null,chunks=[],mimeT='',wake=null;
+let playing=false,recording=false,mr=null,chunks=[],mimeT='',wake=null;
 function setPlayLabel(){$('bPlay').innerHTML=playing?'&#9208; Pausar':'&#9654; Play'}
 async function keepAwake(){try{if(navigator.wakeLock)wake=await navigator.wakeLock.request('screen')}catch(e){}}
 async function play(){initAudio();try{await AC.resume()}catch(e){}try{await voicesReady}catch(e){}
-  if(gt>=DUR-.02)gt=0;t0=performance.now()-gt*1000;playing=true;lastHalf=-1;needVoice=true;setPlayLabel();keepAwake()}
+  playing=true;lastNow=performance.now();startVoice(curIdx,curTs);setPlayLabel();keepAwake()}
 function pause(){playing=false;stopVoice();setPlayLabel()}
 function onEnd(){playing=false;stopVoice();setPlayLabel();if(recording)setTimeout(stopRec,500)}
-function tick(){
-  if(playing){gt=(performance.now()-t0)/1000;if(gt>=DUR){gt=DUR-1e-3;onEnd()}}
-  const i=frame(gt);
-  if(playing&&AC){const h=Math.floor(gt*BPM/60*2);if(h!==lastHalf){lastHalf=h;if(h%2===0)kick();else hat()}
-    if(lastScene>=0&&i!==lastScene)whoosh();
-    if(needVoice||i!==voiceScene){needVoice=false;voiceScene=i;startVoice(i,gt-SC[i].start)}
-    const sv=SC[i],tv=gt-sv.start,fala=VB[i]&&tv>=(sv.voice_at||0)&&tv<(sv.voice_at||0)+VB[i].duration;
-    beatG.gain.setTargetAtTime(fala?.3:.8,AC.currentTime,.12)}
-  lastScene=i;
-  $('hud').textContent=(recording?'● GRAVANDO  ':'')+gt.toFixed(1)+'s / '+DUR+'s  ·  cena '+(i+1)+'/'+SC.length+' ('+SC[i].origem+')';
-  if(playing)$('seek').value=Math.round(gt/DUR*1000);
+function tick(now){
+  now=now||performance.now();const dt=Math.max(0,Math.min(0.1,(now-lastNow)/1000));lastNow=now;
+  if(playing){
+    curTs+=dt;totalElapsed+=dt;const curSc=SC[curIdx];const isSpeaking=isVoiceActive(curIdx);
+    if(curTs>=curSc.dur){
+      if(isSpeaking){curSc.dur=Math.max(curSc.dur,curTs+0.8);DUR=SC.reduce((a,s)=>a+s.dur,0)}
+      else{
+        curIdx++;curTs=0;
+        if(curIdx>=SC.length){curIdx=0;curTs=0;totalElapsed=0;stopVoice();if(recording){stopRec();playing=false}}
+        else{whoosh();startVoice(curIdx,0)}
+      }
+    }
+  }
+  paint(ctx,curIdx,curTs,totalElapsed);
+  if(playing&&AC){
+    const h=Math.floor(totalElapsed*BPM/60*2);if(h!==lastHalf){lastHalf=h;if(h%2===0)kick();else hat()}
+    const isSpeaking=isVoiceActive(curIdx);beatG.gain.setTargetAtTime(isSpeaking?.2:.8,AC.currentTime,.12)}
+  const curSc=SC[curIdx];const totalReelDur=SC.reduce((a,s)=>a+s.dur,0);
+  $('hud').textContent=(recording?'● GRAVANDO  ':'')+totalElapsed.toFixed(1)+'s / '+totalReelDur.toFixed(1)+'s  ·  cena '+(curIdx+1)+'/'+SC.length+' ('+curSc.origem+')'+(VB[curIdx]?'  ·  🎙️ TTS':'');
+  if(playing)$('seek').value=Math.min(1000,Math.round(totalElapsed/Math.max(0.1,totalReelDur)*1000));
   requestAnimationFrame(tick)}
 
 function fitCanvas(){const st=$('stage'),r=W/H;let w=st.clientWidth,h=st.clientHeight;if(w<=0||h<=0)return;
@@ -548,7 +577,7 @@ async function startRec(){
 function stopRec(){if(mr&&mr.state!=='inactive')mr.stop()}
 
 $('bPlay').onclick=()=>playing?pause():play();
-$('bRest').onclick=()=>{gt=0;if(playing)t0=performance.now();lastHalf=-1;stopVoice();needVoice=true};
+$('bRest').onclick=()=>{curIdx=0;curTs=0;totalElapsed=0;lastHalf=-1;stopVoice();if(playing)startVoice(0,0)};
 $('bSnd').onclick=()=>{muted=!muted;initAudio();master.gain.value=muted?0:.9;$('bSnd').innerHTML=muted?'&#128263; Mudo':'&#128266; Som'};
 $('bRec').onclick=startRec;
 function saveCode(){
@@ -571,7 +600,10 @@ async function saveHTML(){
   a.href=URL.createObjectURL(b);a.download=(D.title||'showreel').replace(/[^\w\-]+/g,'_')+'.html';
   document.body.appendChild(a);a.click();a.remove();log('HTML completo salvo (download)')}
 $('bHtml').onclick=saveHTML;
-$('seek').oninput=e=>{pause();gt=e.target.value/1000*DUR};
+$('seek').oninput=e=>{
+  pause();const p=Number(e.target.value)/1000,total=SC.reduce((a,s)=>a+s.dur,0),tgt=p*total;let acc=0;
+  for(let k=0;k<SC.length;k++){if(tgt>=acc&&tgt<acc+SC[k].dur||k===SC.length-1){curIdx=k;curTs=tgt-acc;totalElapsed=tgt;stopVoice();break}acc+=SC[k].dur}
+};
 log('DNA: '+D.dna.estilo+' | '+D.dna.structure+' | '+D.dna.transition+' | '+BPM+' bpm | energia '+EN+' | tema '+(D.ui_nome||'-')+' | fonte '+(D.dna.fonte&&D.dna.fonte.nome||'-'));
 SC.forEach((s,i)=>log((i+1)+'. ['+s.role+'] '+s.text+'  ('+s.origem+', layout '+s.layout+', '+s.dur.toFixed(1)+'s)'));
 fitCanvas();requestAnimationFrame(tick);

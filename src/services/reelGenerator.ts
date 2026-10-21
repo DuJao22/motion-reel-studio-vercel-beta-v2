@@ -196,7 +196,90 @@ M.mainText=(ctx,W,H,P,ts,o={})=>{
 M.sub=(ctx,W,H,P,ts)=>{const s=String(P.sub||'').trim();if(!s)return;const a=M.p(ts,P.subAt===undefined?.55:P.subAt,.35);if(a<=0)return;
   const z=(P.zones&&P.zones.sub)||{cy:H*.87,w:W*.86,h:H*.07},L=M.lines(s,s.length>36?Math.ceil(s.length/2)+4:60).slice(0,2),
     long=L.reduce((x,y)=>x.length>y.length?x:y,''),sz=Math.min(M.fit(ctx,long,z.w,W*.045,600),z.h*1.15/(L.length*1.2)),lh=sz*1.22;
-  L.forEach((l,i)=>M.text(ctx,l,W/2,z.cy+(i-(L.length-1)/2)*lh+(1-a)*20,sz,{color:P.pal.dim,alpha:a,weight:600}))};
+M.emotionCard=(ctx,W,H,P,ts,sc)=>{
+  const emotion=sc.emotion||{tag:'MOTION DESIGN',emoji:'⚡',color:P.pal.acc};
+  const introP=M.p(ts,0.10,0.45);
+  if(introP<=0)return;
+  const easeIntro=M.ease.outBack(introP);
+  const outroP=ts>sc.dur-0.3?1-M.p(ts,sc.dur-0.3,0.3):1;
+  const alpha=introP*outroP;
+  if(alpha<=0.01)return;
+
+  ctx.save();
+  ctx.globalAlpha=M.clamp(alpha);
+
+  const fontFam=D.dna.fonte&&D.dna.fonte.stack||M.font;
+  const badgeY0=Math.round(H*0.075);
+  const slideDy=(1-easeIntro)*-35;
+  const badgeY=badgeY0+slideDy;
+
+  ctx.font='800 '+Math.round(W*0.032)+'px '+fontFam;
+  const tagText=String(emotion.tag||'MOTION').toUpperCase();
+  const textW=ctx.measureText(tagText).width;
+  const emojiStr=emotion.emoji||'⚡';
+
+  const cardW=textW+Math.round(W*0.14);
+  const cardH=Math.round(H*0.046);
+  const cardX=Math.round((W-cardW)/2);
+
+  const voiceBounce=(P.voice||0)*4;
+  const breatheY=Math.sin(ts*3.5)*3;
+  const finalY=badgeY+breatheY-voiceBounce;
+
+  // 1. Draw glowing pill backdrop
+  ctx.save();
+  M.rrect(ctx,cardX,finalY,cardW,cardH,cardH/2);
+  ctx.fillStyle='rgba(8,10,18,0.86)';
+  ctx.fill();
+  ctx.lineWidth=1.5;
+  ctx.strokeStyle=M.col(emotion.color||P.pal.acc,0.7+0.3*(P.pulse||0));
+  ctx.shadowColor=emotion.color||P.pal.acc;
+  ctx.shadowBlur=12*(1+(P.voice||0)*0.8);
+  ctx.stroke();
+  ctx.restore();
+
+  // 2. Draw Emoji with subtle spring scale
+  ctx.save();
+  const emojiSize=Math.round(cardH*0.62);
+  ctx.font=emojiSize+'px "Apple Color Emoji","Segoe UI Emoji",sans-serif';
+  ctx.textAlign='center';
+  ctx.textBaseline='middle';
+  const emojiX=cardX+cardH*0.58;
+  const emojiY=finalY+cardH/2;
+  ctx.fillText(emojiStr,emojiX,emojiY);
+  ctx.restore();
+
+  // 3. Draw Emotion Tag
+  ctx.save();
+  ctx.font='800 '+Math.round(W*0.030)+'px '+fontFam;
+  ctx.textAlign='left';
+  ctx.textBaseline='middle';
+  ctx.fillStyle='#ffffff';
+  ctx.fillText(tagText,cardX+cardH*1.05,finalY+cardH/2);
+
+  // Mini live dot
+  ctx.beginPath();
+  ctx.arc(cardX+cardW-cardH*0.45,finalY+cardH/2,3.5,0,Math.PI*2);
+  ctx.fillStyle=emotion.color||P.pal.acc;
+  ctx.shadowColor=emotion.color||P.pal.acc;
+  ctx.shadowBlur=6;
+  ctx.fill();
+  ctx.restore();
+
+  // 4. Orbiting Emotion Sparkles
+  for(let s=0;s<4;s++){
+    const angle=ts*2.5+s*(Math.PI/2);
+    const orbitR=cardH*0.65+Math.sin(ts*4+s)*4;
+    const sx=emojiX+Math.cos(angle)*orbitR;
+    const sy=emojiY+Math.sin(angle)*(orbitR*0.55);
+    ctx.fillStyle=M.col(emotion.color||P.pal.acc,0.6+0.4*Math.sin(ts*6+s));
+    ctx.beginPath();
+    ctx.arc(sx,sy,1.8*(1+(P.pulse||0)*0.5),0,Math.PI*2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+};
 
 M.speechCard=(ctx,W,H,P,ts,sc)=>{
   const speechText=String(sc.fala||P.say||sc.sub||'').trim();
@@ -445,11 +528,14 @@ function paint(c,i,ts,gt,strict){
   M.bg(c,W,H,P,i);
   try{runScene(c,s,ts,gt,P)}
   catch(e){if(strict)throw e;degrade(i,e);resetCtx(c);M._boxes.length=0;P=mkP(s,i,gt,ts);M.bg(c,W,H,P,i);runScene(c,s,ts,gt,P)}
+  try{M.emotionCard(c,W,H,P,ts,s)}catch(e){}
   try{M.speechCard(c,W,H,P,ts,s)}catch(e){}
 }
 
 /* ====================== Motor de áudio (batida sintetizada + narração TTS humana) ====================== */
-let AC=null,master=null,beatG=null,vG=null,adest=null,muted=false,playing=false,gt=0,t0=0,lastHalf=-1,voiceScene=-1,needVoice=true;
+let AC=null,master=null,beatG=null,vG=null,adest=null,muted=false,playing=false;
+let curIdx=0,curTs=0,totalElapsed=0;
+let lastHalf=-1,voiceScene=-1,needVoice=true;
 let VB=[],voicesReady=null,curV=null,speechActive=false,lastNow=performance.now();
 let mr=null,chunks=[],recording=false,mimeT='';
 
@@ -474,7 +560,7 @@ function decodeVoices(){
       VB[i]=await AC.decodeAudioData(u.buffer.slice(0));
       if(VB[i] && VB[i].duration){
         const voiceAt = s.voice_at || 0.45;
-        const minNeeded = voiceAt + VB[i].duration + 0.75;
+        const minNeeded = voiceAt + VB[i].duration + 1.1;
         if(s.dur < minNeeded){
           s.dur = Math.round(minNeeded * 10) / 10;
         }
@@ -499,6 +585,7 @@ function startVoice(i,ts){
   stopVoice();
   const s=SC[i];
   if(!s)return;
+  voiceScene=i;
   const buf=VB[i];
   const at=s.voice_at||0.45;
 
@@ -523,7 +610,7 @@ function startVoice(i,ts){
       window.speechSynthesis.cancel();
       const u=new SpeechSynthesisUtterance(s.fala);
       u.lang='pt-BR';
-      u.rate=1.05;
+      u.rate=1.02;
       u.pitch=1.0;
       const vs=window.speechSynthesis.getVoices();
       const pt=vs.find(v=>v.lang&&v.lang.startsWith('pt')&&(v.name.includes('Natural')||v.name.includes('Google')||v.name.includes('Luciana')||v.name.includes('Felipe')))||vs.find(v=>v.lang&&v.lang.startsWith('pt'));
@@ -587,59 +674,58 @@ function whoosh(){
   s.connect(f);f.connect(g);g.connect(beatG);s.start(t);s.stop(t+.3);
 }
 
-function frame(t){
-  t=((t%DUR)+DUR)%DUR;
-  for(let i=0;i<SC.length;i++){if(t>=SC[i].start&&t<SC[i].start+SC[i].dur)return i}
-  return SC.length-1;
-}
-
-let lastScene=-1;
 function tick(now){
   const dt = Math.max(0, Math.min(0.1, (now - lastNow) / 1000));
   lastNow = now;
 
   if(playing){
-    gt=(now-t0)/1000;
+    curTs += dt;
+    totalElapsed += dt;
+
+    const curSc = SC[curIdx];
+    const isSpeaking = isVoiceActive(curIdx);
 
     // Guaranteed speech completion: never switch scene if narration is still actively speaking!
-    const curIdx = frame(gt);
-    const curSc = SC[curIdx];
-    const sceneEnd = curSc.start + curSc.dur;
+    if(curTs >= curSc.dur){
+      if(isSpeaking){
+        curSc.dur = Math.max(curSc.dur, curTs + 0.6);
+      } else {
+        curIdx++;
+        curTs = 0;
 
-    if(gt >= sceneEnd - 0.08 && isVoiceActive(curIdx)){
-      curSc.dur += dt;
-      for(let k = curIdx + 1; k < SC.length; k++){
-        SC[k].start += dt;
+        if(curIdx >= SC.length){
+          curIdx = 0;
+          curTs = 0;
+          totalElapsed = 0;
+          stopVoice();
+          if(recording){
+            stopRec();
+            playing = false;
+          }
+        } else {
+          whoosh();
+          startVoice(curIdx, 0);
+        }
       }
-      DUR += dt;
-      D.duration = DUR;
-      gt = curSc.start + curSc.dur - 0.08;
-      t0 = now - gt * 1000;
     }
+  }
 
-    if(gt>=DUR){
-      gt=0;t0=now;lastHalf=-1;
-      stopVoice();
-      if(recording){stopRec();playing=false}
+  paint(ctx, curIdx, curTs, totalElapsed, false);
+
+  if(playing && AC){
+    const h = Math.floor(totalElapsed * BPM / 60 * 2);
+    if(h !== lastHalf){
+      lastHalf = h;
+      if(h % 2 === 0) kick(); else hat();
     }
+    const isSpeaking = isVoiceActive(curIdx);
+    beatG.gain.setTargetAtTime(isSpeaking ? 0.18 : 0.8, AC.currentTime, 0.12);
   }
-  const i=frame(gt),sc=SC[i],ts=gt-sc.start;
-  paint(ctx,i,ts,gt,false);
-  if(playing&&AC){
-    const h=Math.floor(gt*BPM/60*2);
-    if(h!==lastHalf){lastHalf=h;if(h%2===0)kick();else hat()}
-    if(lastScene>=0&&i!==lastScene)whoosh();
-    if(needVoice||i!==voiceScene){
-      needVoice=false;
-      voiceScene=i;
-      startVoice(i,gt-SC[i].start);
-    }
-    const isSpeaking=isVoiceActive(i);
-    beatG.gain.setTargetAtTime(isSpeaking?.20:.8,AC.currentTime,.12);
-  }
-  lastScene=i;
-  $('hud').textContent=(recording?'● GRAVANDO  ':'')+gt.toFixed(1)+'s / '+DUR.toFixed(1)+'s  ·  cena '+(i+1)+'/'+SC.length+' ('+sc.origem+')'+(VB[i]?'  ·  🎙️ TTS':'');
-  if(playing)$('seek').value=Math.round(gt/DUR*1000);
+
+  const curSc = SC[curIdx];
+  const totalReelDur = SC.reduce((a, s) => a + s.dur, 0);
+  $('hud').textContent = (recording ? '● GRAVANDO  ' : '') + totalElapsed.toFixed(1) + 's / ' + totalReelDur.toFixed(1) + 's  ·  cena ' + (curIdx + 1) + '/' + SC.length + ' (' + curSc.origem + ')' + (VB[curIdx] ? '  ·  🎙️ TTS' : '');
+  if(playing) $('seek').value = Math.min(1000, Math.round(totalElapsed / Math.max(0.1, totalReelDur) * 1000));
   requestAnimationFrame(tick);
 }
 
@@ -653,11 +739,11 @@ if(typeof ResizeObserver!=='undefined')new ResizeObserver(fitCanvas).observe($('
 
 async function play(){
   initAudio();
-  if(AC&&AC.state==='suspended')await AC.resume();
-  try{await voicesReady}catch(e){}
+  if(AC && AC.state==='suspended') await AC.resume();
+  try{ await voicesReady }catch(e){}
   playing=true;
-  t0=performance.now()-gt*1000;
-  needVoice=true;
+  lastNow=performance.now();
+  startVoice(curIdx, curTs);
   $('bPlay').innerHTML='&#9208; Pausa';
 }
 function pause(){
@@ -681,15 +767,33 @@ async function startRec(){
     $('dl').innerHTML='<a download="'+name+'" href="'+url+'">⬇ Baixar vídeo ('+ext.toUpperCase()+', '+(blob.size/1e6).toFixed(1)+' MB)</a>';
     $('dl').firstChild.click();recording=false;$('bRec').disabled=false;log('gravação pronta: '+ext);
   };
-  recording=true;$('bRec').disabled=true;$('dl').innerHTML='';gt=0;mr.start(500);await play();
+  recording=true;$('bRec').disabled=true;$('dl').innerHTML='';curIdx=0;curTs=0;totalElapsed=0;mr.start(500);await play();
 }
 function stopRec(){if(mr&&mr.state!=='inactive')mr.stop()}
 
 $('bPlay').onclick=()=>playing?pause():play();
-$('bRest').onclick=()=>{gt=0;stopVoice();lastScene=-1;voiceScene=-1;needVoice=true;if(playing)t0=performance.now();lastHalf=-1};
+$('bRest').onclick=()=>{
+  curIdx=0;curTs=0;totalElapsed=0;lastHalf=-1;
+  stopVoice();
+  if(playing) startVoice(0,0);
+};
 $('bSnd').onclick=()=>{muted=!muted;initAudio();if(master)master.gain.value=muted?0:.9;$('bSnd').innerHTML=muted?'&#128263; Mudo':'&#128266; Som'};
 $('bRec').onclick=startRec;
-$('seek').oninput=e=>{pause();stopVoice();lastScene=-1;voiceScene=-1;needVoice=true;gt=e.target.value/1000*DUR};
+$('seek').oninput=e=>{
+  pause();
+  const p=Number(e.target.value)/1000;
+  const totalReelDur=SC.reduce((a,s)=>a+s.dur,0);
+  const targetTime=p*totalReelDur;
+  let acc=0;
+  for(let k=0;k<SC.length;k++){
+    if(targetTime>=acc && targetTime<acc+SC[k].dur || k===SC.length-1){
+      curIdx=k;curTs=targetTime-acc;totalElapsed=targetTime;
+      stopVoice();
+      break;
+    }
+    acc+=SC[k].dur;
+  }
+};
 function saveCode(){
   let out='// Showreel: '+D.title+'\\n// DNA: '+D.dna.estilo+' | '+D.dna.structure+' | '+D.dna.transition+' | '+BPM+' bpm\\n';
   out+='// Cada cena abaixo e o CORPO de uma funcao (ctx, t, ts, W, H, P, M)\\n\\n';
@@ -871,15 +975,40 @@ async function callGeminiTTS(
 // Voice Duration & Audio Envelope Calculation Helpers
 // -------------------------------------------------------------
 function estimateSpeechDuration(text: string): number {
-  if (!text || !text.trim()) return 3.8;
+  if (!text || !text.trim()) return 4.5;
   const words = text.trim().split(/\s+/).filter(Boolean).length;
   const puncts = (text.match(/[,.;:!?—]/g) || []).length;
-  // Natural spoken pace in Brazilian Portuguese: ~130 words per minute (~0.46s per word)
-  // Natural pause at commas/periods: ~0.35s
+  // Natural spoken pace with articulation in Brazilian Portuguese: ~0.50s per word + 0.40s per punctuation
   // Pre-roll (voice_at): 0.45s
-  // Post-roll breathing buffer so sentence reverberates naturally before scene transition: 0.85s
-  const estimated = 0.45 + (words * 0.46) + (puncts * 0.35) + 0.85;
-  return Math.max(4.0, Math.ceil(estimated * 10) / 10);
+  // Post-roll breathing room: 1.2s to ensure the sentence is NEVER cut off abruptly before the scene ends
+  const estimated = 0.45 + (words * 0.50) + (puncts * 0.40) + 1.2;
+  return Math.max(4.8, Math.ceil(estimated * 10) / 10);
+}
+
+export function detectSceneEmotion(text: string, fala: string, role?: string): { emoji: string; tag: string; color: string } {
+  const combined = (text + ' ' + fala + ' ' + (role || '')).toLowerCase();
+  if (role === 'closing' || combined.includes('agora') || combined.includes('experimente') || combined.includes('acesse') || combined.includes('clique')) {
+    return { emoji: '🎬', tag: 'AÇÃO', color: '#10b981' };
+  }
+  if (combined.includes('potên') || combined.includes('veloc') || combined.includes('perfor') || combined.includes('rápid') || combined.includes('aceler')) {
+    return { emoji: '⚡', tag: 'PERFORMANCE', color: '#f59e0b' };
+  }
+  if (combined.includes('futur') || combined.includes('ia') || combined.includes('inteligên') || combined.includes('tech') || combined.includes('digital') || combined.includes('dados')) {
+    return { emoji: '🔮', tag: 'TECNOLOGIA', color: '#06b6d4' };
+  }
+  if (combined.includes('design') || combined.includes('eleg') || combined.includes('exclusiv') || combined.includes('lux') || combined.includes('estilo') || combined.includes('arte')) {
+    return { emoji: '💎', tag: 'DESIGN', color: '#a855f7' };
+  }
+  if (combined.includes('meta') || combined.includes('foco') || combined.includes('precis') || combined.includes('result') || combined.includes('sucess')) {
+    return { emoji: '🎯', tag: 'OBJETIVO', color: '#10b981' };
+  }
+  if (combined.includes('fogo') || combined.includes('quente') || combined.includes('viral') || combined.includes('máxim') || combined.includes('impact')) {
+    return { emoji: '🔥', tag: 'IMPACTO', color: '#ef4444' };
+  }
+  if (role === 'hook' || combined.includes('inova') || combined.includes('nov') || combined.includes('começ') || combined.includes('visão')) {
+    return { emoji: '🚀', tag: 'INOVAÇÃO', color: '#ec4899' };
+  }
+  return { emoji: '✨', tag: 'MOTION', color: '#3b82f6' };
 }
 
 async function getAudioDurationAndEnvelope(base64Wav: string): Promise<{ duration: number; env?: number[] }> {
@@ -1076,12 +1205,14 @@ Responda APENAS com JSON:
   const rawScenes: SceneData[] = plan.scenes.map((s: any, idx: number) => {
     const speechText = (s.fala || `${s.text}. ${s.sub}`).trim();
     const neededSpeechDur = estimateSpeechDuration(speechText);
-    const parsedDur = parseFloat(s.duracao) || 4.0;
-    // Guarantee scene duration accommodates full spoken sentence
+    const parsedDur = parseFloat(s.duracao) || 4.5;
+    // Guarantee scene duration accommodates full spoken sentence without hurry
     const initialDur = Math.max(parsedDur, neededSpeechDur);
+    const role = s.role || (idx === 0 ? 'hook' : idx === plan.scenes.length - 1 ? 'closing' : 'body');
+    const emotion = detectSceneEmotion(s.text || '', speechText, role);
 
     return {
-      role: s.role || (idx === 0 ? 'hook' : idx === plan.scenes.length - 1 ? 'closing' : 'body'),
+      role,
       text: (s.text || 'MOTION').slice(0, 40),
       sub: (s.sub || '').slice(0, 90),
       dur: initialDur,
@@ -1090,7 +1221,8 @@ Responda APENAS com JSON:
       voice_at: 0.45,
       sub_at: Math.round((0.45 + initialDur * 0.4) * 10) / 10,
       layout: idx === plan.scenes.length - 1 ? 'centro' : (['arte_cima', 'texto_cima', 'meio', 'centro'][idx % 4]),
-      fb: ['kinetic', 'burst', 'tunnel', 'grid', 'orbit', 'cube'][idx % 6]
+      fb: ['kinetic', 'burst', 'tunnel', 'grid', 'orbit', 'cube'][idx % 6],
+      emotion
     };
   });
 
@@ -1134,14 +1266,15 @@ Responda APENAS com JSON:
           sc.audio_dur = Math.round(audioDur * 100) / 100;
           if (env && env.length) sc.env = env;
 
-          // Scene duration MUST allow voice_at + full audio duration + natural breathing buffer (0.8s)
+          // Scene duration MUST allow voice_at + full audio duration + generous breathing buffer (1.2s)
+          // This guarantees that the speech is NEVER cut off mid-sentence
           const voiceAt = sc.voice_at || 0.45;
-          const minSceneDur = Math.ceil((voiceAt + audioDur + 0.8) * 10) / 10;
+          const minSceneDur = Math.ceil((voiceAt + audioDur + 1.2) * 10) / 10;
           if (sc.dur < minSceneDur) {
             sc.dur = minSceneDur;
           }
           sc.sub_at = Math.round((voiceAt + Math.min(audioDur * 0.45, 2.0)) * 10) / 10;
-          onLog(`🎙️ Cena ${i + 1}/${rawScenes.length}: áudio de ${audioDur.toFixed(1)}s sincronizado (duração total da cena: ${sc.dur}s)`);
+          onLog(`🎙️ Cena ${i + 1}/${rawScenes.length}: áudio de ${audioDur.toFixed(1)}s sincronizado (duração total calibrada: ${sc.dur}s)`);
         } else {
           onLog(`🎙️ Áudio da cena ${i + 1}/${rawScenes.length} sintetizado (${options.voice})`);
         }
@@ -1197,7 +1330,7 @@ Responda APENAS com JSON:
     });
 
     const codePrompt = `Você é um desenvolvedor especialista em HTML5 Canvas 2D e Motion Design.
-Escreva APENAS o corpo em JavaScript de uma função que renderiza a cena ${i + 1} de um showreel.
+Escreva APENAS o corpo em JavaScript de uma função que renderiza a cena ${i + 1} de um showreel vertical 9:16 altamente visual, dinâmico e cinematográfico.
 Parâmetros disponíveis:
 - ctx: CanvasRenderingContext2D
 - t: progresso da cena (0.0 a 1.0)
@@ -1205,18 +1338,19 @@ Parâmetros disponíveis:
 - W: largura do canvas (${W})
 - H: altura do canvas (${H})
 - P: { text: "${sc.text}", sub: "${sc.sub}", pal: { bg1, bg2, acc, acc2, fg, dim }, pulse: 0..1, bpm: ${dna.bpm}, zones: { main, art, safe, sub } }
-- M: biblioteca com M.titleChars(ctx, W, H, P, ts, {effect:'rise'|'drop'|'scale'}), M.particles, M.arc, M.glow, M.ease, M.stagger, M.col, M.rot3, M.proj, M.rrect, M.poly, M.star.
+- M: biblioteca rica com M.titleChars(ctx, W, H, P, ts, {effect:'rise'|'drop'|'scale'}), M.particles, M.arc, M.glow, M.ease, M.stagger, M.col, M.rot3, M.proj, M.rrect, M.poly, M.star, M.emotionCard, M.speechCard.
 
 Cena:
 - Papel: ${sc.role}
 - Texto: "${sc.text}"
 - Ideia visual: ${sc.idea}
 - Layout: ${sc.layout}
+- Roteiro falado: "${sc.fala || sc.sub}"
 
 Regras:
 1. Retorne APENAS o código JavaScript executável, sem blocos markdown (\`\`\`), sem declaração de função externa.
 2. Não use APIs proibidas (sem fetch, sem window, sem document).
-3. Use sempre P.zones.art para elementos visuais e chame M.titleChars(ctx, W, H, P, ts) ou M.mainText(ctx, W, H, P, ts) para o texto.`;
+3. Crie animações visuais ricas na área visual P.zones.art (formas geométricas, anéis orbitais, partículas com glow, grids ou túneis 3D) e chame M.titleChars(ctx, W, H, P, ts) ou M.mainText(ctx, W, H, P, ts) para o texto principal.`;
 
     const geminiCode = await callGeminiProxy(options.keys, codePrompt, { temperature: 0.5 }, onLog);
     if (geminiCode) {
@@ -1227,7 +1361,8 @@ Regras:
       ...sc,
       code: generatedCode || undefined,
       origem: generatedCode ? 'gemini' : 'fallback',
-      audio: sc.audio
+      audio: sc.audio,
+      emotion: sc.emotion || detectSceneEmotion(sc.text, sc.fala || '', sc.role)
     };
 
     finalScenes.push(sceneObj);
@@ -1251,11 +1386,13 @@ Regras:
   }
 
   // 4. Assemble the Standalone HTML5 Showreel File
+  const finalTotalDuration = finalScenes.reduce((acc, sc) => acc + sc.dur, 0);
+
   const reelDataPayload = {
     title: plan.title,
     W,
     H,
-    duration: totalDuration,
+    duration: finalTotalDuration,
     fps: options.fps || 24,
     voice: options.voice || 'Kore',
     dna: {
@@ -1320,7 +1457,7 @@ Regras:
       title: plan.title,
       filename,
       html_url: htmlBlobUrl,
-      total_duration: totalDuration,
+      total_duration: finalTotalDuration,
       scenes_count: finalScenes.length,
       dna,
       dados: reelDataPayload,

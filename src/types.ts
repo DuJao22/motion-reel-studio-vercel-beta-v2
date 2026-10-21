@@ -55,6 +55,11 @@ export interface SceneData {
   sub_at?: number;
   env?: number[];
   audio_dur?: number;
+  emotion?: {
+    tag: string;
+    emoji: string;
+    color: string;
+  };
 }
 
 export interface ReelDNA {

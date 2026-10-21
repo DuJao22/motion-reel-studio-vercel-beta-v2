@@ -82,6 +82,12 @@ export const SceneInspector: React.FC<SceneInspectorProps> = ({ scenes, title, m
                       <span className="font-semibold text-xs text-zinc-100 truncate">
                         {scene.text}
                       </span>
+                      {scene.emotion && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded border font-semibold flex items-center gap-1 bg-zinc-800/90 text-zinc-200 border-zinc-700">
+                          <span>{scene.emotion.emoji}</span>
+                          <span className="text-[9px] tracking-wide font-mono">{scene.emotion.tag}</span>
+                        </span>
+                      )}
                       <span className={`text-[10px] px-1.5 py-0.2 rounded border font-medium ${roleInfo.color}`}>
                         {roleInfo.label}
                       </span>

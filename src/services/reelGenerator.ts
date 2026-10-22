@@ -390,7 +390,7 @@ M.speechCard=(ctx,W,H,P,ts,sc)=>{
 
   // 3. Kinetic Word Highlights (Karaoke style)
   const textStartY=curCardY+cardPadY+headerH+fontSize*0.55;
-  const speechDur=Math.max(0.8,(sc.audio_dur||(sc.dur-voiceAt-0.5)));
+  const speechDur=Math.max(0.8,(sc.audio_dur||(sc.dur-voiceAt-0.55)));
   const speechElapsed=Math.max(0,ts-voiceAt);
   const speechProg=M.clamp(speechElapsed/speechDur);
   const activeWordGlobalIdx=Math.floor(speechProg*words.length);
@@ -496,16 +496,32 @@ const SC=D.scenes.map((s,i)=>{let fn=null,origem='fallback',layout=s.layout||'ce
   if(!fn){fn=FB[s.fb]||FB.kinetic;layout=FBL[s.fb]||'centro'}
   return Object.assign({},s,{fn:fn,origem:origem,layout:layout,start:0})});
 
-SC.forEach(s=>{
-  const voiceAt=s.voice_at||0.45;
-  if(s.fala && D.voice !== 'none'){
-    const words = s.fala.split(/\s+/).filter(Boolean).length;
-    const puncts = (s.fala.match(/[,.;:!?—]/g) || []).length;
-    const minNeeded = voiceAt + (words * 0.45) + (puncts * 0.35) + 0.85;
-    if(s.dur < minNeeded){
-      s.dur = Math.round(minNeeded * 10) / 10;
-    }
-  }
+function calcSpeechTiming(text, voiceAt){
+  text = String(text || '').trim();
+  if(!text) return { charCount: 0, wordCount: 0, speechDuration: 3.5, sceneDuration: 5.0, voiceAt: voiceAt || 0.40, subAt: 1.5 };
+  const charCount = text.length;
+  const words = text.split(/\\s+/).filter(Boolean);
+  const wordCount = words.length;
+  const charTime = charCount / 13.5;
+  const longWords = words.filter(w => w.length > 6).length;
+  const wordTime = (wordCount * 0.48) + (longWords * 0.12);
+  const commas = (text.match(/[,;—–\\-]/g) || []).length;
+  const periods = (text.match(/[.!?:]/g) || []).length;
+  const pauseTime = (commas * 0.35) + (periods * 0.55);
+  const speechDuration = Math.round(Math.max(2.0, Math.max(charTime, wordTime) + pauseTime) * 10) / 10;
+  const vAt = voiceAt || 0.40;
+  const sceneDuration = Math.max(5.0, Math.ceil((vAt + speechDuration + 0.55) * 10) / 10);
+  const subAt = Math.round(Math.min(vAt + Math.max(0.6, speechDuration * 0.42), sceneDuration - 0.8) * 10) / 10;
+  return { charCount, wordCount, speechDuration, sceneDuration, voiceAt: vAt, subAt };
+}
+
+SC.forEach((s, idx) => {
+  const speechText = String(s.fala || (s.text ? (s.text + '. ' + (s.sub || '')) : '')).trim();
+  const timing = calcSpeechTiming(speechText, s.voice_at || 0.40);
+  s.voice_at = timing.voiceAt;
+  if(!s.audio_dur) s.audio_dur = timing.speechDuration;
+  if(!s.sub_at) s.sub_at = timing.subAt;
+  s.dur = Math.max(s.dur || 0, timing.sceneDuration);
 });
 let _acc=0;SC.forEach(s=>{s.start=_acc;_acc+=s.dur});
 let DUR=_acc;
@@ -568,21 +584,21 @@ function decodeVoices(){
         for(let k=0;k<bin.length;k++)u[k]=bin.charCodeAt(k);
         VB[i]=await AC.decodeAudioData(u.buffer.slice(0));
         if(VB[i] && VB[i].duration){
-          const voiceAt = s.voice_at || 0.50;
-          const exactSceneDur = Math.round((voiceAt + VB[i].duration + 1.5) * 10) / 10;
-          s.dur = Math.max(s.dur || 0, exactSceneDur);
-          s.audio_dur = VB[i].duration;
+          const voiceAt = s.voice_at || 0.40;
+          const exactSceneDur = Math.ceil((voiceAt + VB[i].duration + 0.55) * 10) / 10;
+          s.dur = Math.max(5.0, exactSceneDur);
+          s.audio_dur = Math.round(VB[i].duration * 100) / 100;
         }
       }catch(e){
         log('voz cena '+(i+1)+': decodificação de áudio ('+e.message+')');
       }
-    } else if(s.fala){
-      const words = s.fala.trim().split(/\s+/).filter(Boolean);
-      const puncts = (s.fala.match(/[,.;:!?—]/g) || []).length;
-      const longWords = words.filter(w=>w.length > 6).length;
-      const est = 0.50 + (words.length * 0.58) + (longWords * 0.18) + (puncts * 0.50) + 1.50;
-      const exactSceneDur = Math.max(5.5, Math.round(est * 10) / 10);
-      s.dur = Math.max(s.dur || 0, exactSceneDur);
+    } else {
+      const speechText = String(s.fala || (s.text ? (s.text + '. ' + (s.sub || '')) : '')).trim();
+      const timing = calcSpeechTiming(speechText, s.voice_at || 0.40);
+      s.dur = Math.max(s.dur || 0, timing.sceneDuration);
+      s.audio_dur = timing.speechDuration;
+      s.voice_at = timing.voiceAt;
+      s.sub_at = timing.subAt;
     }
   })).then(()=>{
     let acc=0;SC.forEach(s=>{s.start=acc;acc+=s.dur});
@@ -610,7 +626,7 @@ function startVoice(i,ts){
   activeSpeechScene=i;
   speechFinishedAt=-1;
   const buf=VB[i];
-  const at=s.voice_at||0.50;
+  const at=s.voice_at||0.40;
 
   if(AC&&buf){
     if(ts>=at+buf.duration)return;
@@ -649,10 +665,22 @@ function startVoice(i,ts){
       u.onend=()=>{speechActive=false;speechFinishedAt=performance.now()};
       u.onerror=()=>{speechActive=false;speechFinishedAt=performance.now()};
 
-      const delayMs=Math.max(50,Math.round((at-ts)*1000));
+      if(!window._speechHeartbeat){
+        window._speechHeartbeat=setInterval(()=>{
+          if(typeof window!=='undefined'&&window.speechSynthesis&&window.speechSynthesis.speaking&&!window.speechSynthesis.paused){
+            window.speechSynthesis.pause();
+            window.speechSynthesis.resume();
+          }
+        },5000);
+      }
+
+      const delayMs=Math.max(40,Math.round((at-ts)*1000));
       setTimeout(()=>{
         if(playing && voiceScene === i) {
-          try{window.speechSynthesis.speak(u)}catch(e){speechActive=false}
+          try{
+            window.speechSynthesis.speak(u);
+            speechActive=true;
+          }catch(e){speechActive=false}
         }
       }, delayMs);
     }catch(e){
@@ -713,11 +741,15 @@ function tick(now){
 
     const curSc = SC[curIdx];
     const isSpeaking = isVoiceActive(curIdx);
+    const voiceAt = curSc.voice_at || 0.40;
+    const speechDur = curSc.audio_dur || (curSc.dur - voiceAt - 0.55);
+    const speechEndTime = voiceAt + speechDur;
 
-    // Guaranteed speech completion: never switch scene if narration is still actively speaking!
+    // Guaranteed speech completion: never switch scene if narration is still actively speaking
+    // or if the elapsed time hasn't finished the calculated speech time!
     if(curTs >= curSc.dur){
-      if(isSpeaking){
-        curSc.dur = Math.max(curSc.dur, curTs + 0.8);
+      if(isSpeaking || curTs < speechEndTime){
+        curSc.dur = Math.max(curSc.dur, curTs + 0.6);
         DUR = SC.reduce((a, s) => a + s.dur, 0);
       } else {
         curIdx++;
@@ -1003,20 +1035,70 @@ async function callGeminiTTS(
 // -------------------------------------------------------------
 // Voice Duration & Audio Envelope Calculation Helpers
 // -------------------------------------------------------------
-function estimateSpeechDuration(text: string): number {
-  if (!text || !text.trim()) return 5.5;
-  const clean = text.trim();
-  const words = clean.split(/\s+/).filter(Boolean);
-  const puncts = (clean.match(/[,.;:!?—]/g) || []).length;
-  const longWords = words.filter(w => w.length > 6).length;
+export interface SpeechTimingEstimate {
+  charCount: number;
+  wordCount: number;
+  speechDuration: number;
+  sceneDuration: number;
+  voiceAt: number;
+  subAt: number;
+}
 
-  // Natural spoken pace with articulation in Brazilian Portuguese: ~0.58s per word
-  // Additional pause for complex words: ~0.18s
-  // Breathing pause per punctuation: ~0.50s
-  // Pre-roll (voice_at): 0.50s
-  // Post-roll breathing room: 1.50s so the sentence is NEVER cut off abruptly before the scene ends
-  const estimated = 0.50 + (words.length * 0.58) + (longWords * 0.18) + (puncts * 0.50) + 1.50;
-  return Math.max(5.5, Math.ceil(estimated * 10) / 10);
+export function estimateSpeechDuration(text: string, voiceAt: number = 0.40): SpeechTimingEstimate {
+  const clean = (text || '').trim();
+  if (!clean) {
+    return {
+      charCount: 0,
+      wordCount: 0,
+      speechDuration: 3.5,
+      sceneDuration: 5.0,
+      voiceAt,
+      subAt: 1.5
+    };
+  }
+
+  // 1. Character count
+  const charCount = clean.length;
+
+  // 2. Word count
+  const words = clean.split(/\s+/).filter(Boolean);
+  const wordCount = words.length;
+
+  // Spoken Portuguese timing:
+  // - Average speech rate: ~13.5 characters per second
+  const charTime = charCount / 13.5;
+
+  // - Word pacing: ~0.48s per word (~125 WPM) + articulation pause for long words (>6 letters)
+  const longWords = words.filter(w => w.length > 6).length;
+  const wordTime = (wordCount * 0.48) + (longWords * 0.12);
+
+  // - Natural punctuation pauses
+  const commas = (clean.match(/[,;—–\-]/g) || []).length;
+  const periods = (clean.match(/[.!?:]/g) || []).length;
+  const pauseTime = (commas * 0.35) + (periods * 0.55);
+
+  // Combined spoken speech duration:
+  // Max of charTime and wordTime guarantees adequate time regardless of word length distribution
+  const rawSpeechDur = Math.max(charTime, wordTime) + pauseTime;
+  const speechDuration = Math.round(Math.max(2.0, rawSpeechDur) * 10) / 10;
+
+  // Scene duration:
+  // Voice starts at voiceAt (0.40s)
+  // Post-roll breathing buffer: 0.55s so narration finishes cleanly and completely *immediately before* the scene transition
+  // Narration ends at (voiceAt + speechDuration), exactly 0.55s before transition.
+  const postRollBuffer = 0.55;
+  const minSceneDur = 5.0;
+  const sceneDuration = Math.max(minSceneDur, Math.ceil((voiceAt + speechDuration + postRollBuffer) * 10) / 10);
+  const subAt = Math.round(Math.min(voiceAt + Math.max(0.6, speechDuration * 0.42), sceneDuration - 0.8) * 10) / 10;
+
+  return {
+    charCount,
+    wordCount,
+    speechDuration,
+    sceneDuration,
+    voiceAt,
+    subAt
+  };
 }
 
 export function detectSceneEmotion(text: string, fala: string, role?: string): { emoji: string; tag: string; color: string } {
@@ -1244,10 +1326,10 @@ Responda APENAS com JSON:
 
   const rawScenes: SceneData[] = plan.scenes.map((s: any, idx: number) => {
     const speechText = (s.fala || `${s.text}. ${s.sub}`).trim();
-    const neededSpeechDur = estimateSpeechDuration(speechText);
+    const timing = estimateSpeechDuration(speechText, 0.40);
     const parsedDur = parseFloat(s.duracao) || 6.0;
-    // Set scene duration to the exact calibrated speech time
-    const initialDur = Math.max(parsedDur, neededSpeechDur);
+    // Set scene duration to match the calculated audio estimate, ensuring narration finishes cleanly right before transition
+    const initialDur = Math.max(parsedDur, timing.sceneDuration);
     const role = s.role || (idx === 0 ? 'hook' : idx === plan.scenes.length - 1 ? 'closing' : 'body');
     const emotion = detectSceneEmotion(s.text || '', speechText, role);
 
@@ -1256,10 +1338,11 @@ Responda APENAS com JSON:
       text: (s.text || 'MOTION').slice(0, 40),
       sub: (s.sub || '').slice(0, 90),
       dur: initialDur,
+      audio_dur: timing.speechDuration,
       idea: s.idea || '',
       fala: speechText,
-      voice_at: 0.50,
-      sub_at: Math.round((0.50 + initialDur * 0.4) * 10) / 10,
+      voice_at: timing.voiceAt,
+      sub_at: timing.subAt,
       layout: idx === plan.scenes.length - 1 ? 'centro' : (['arte_cima', 'texto_cima', 'meio', 'centro'][idx % 4]),
       fb: ['kinetic', 'burst', 'tunnel', 'grid', 'orbit', 'cube'][idx % 6],
       emotion
@@ -1307,21 +1390,24 @@ Responda APENAS com JSON:
           if (env && env.length) sc.env = env;
 
           // The scene duration is strictly and directly set to:
-          // voice_at (0.50s) + exact audio duration + post-roll breathing room (1.50s)
-          // This guarantees that the scene duration equals the script speaking time!
-          const voiceAt = sc.voice_at || 0.50;
-          const exactSceneDur = Math.ceil((voiceAt + audioDur + 1.50) * 10) / 10;
-          sc.dur = exactSceneDur;
-          sc.sub_at = Math.round((voiceAt + Math.min(audioDur * 0.45, 2.0)) * 10) / 10;
-          onLog(`🎙️ Cena ${i + 1}/${rawScenes.length}: áudio de ${audioDur.toFixed(1)}s sincronizado (tempo exato da cena: ${sc.dur}s)`);
+          // voice_at (0.40s) + exact audio duration + post-roll breathing room (0.55s)
+          // This guarantees that the narration ends exactly before the scene transition!
+          const voiceAt = sc.voice_at || 0.40;
+          const exactSceneDur = Math.ceil((voiceAt + audioDur + 0.55) * 10) / 10;
+          sc.dur = Math.max(5.0, exactSceneDur);
+          sc.sub_at = Math.round((voiceAt + Math.min(audioDur * 0.42, 2.0)) * 10) / 10;
+          onLog(`🎙️ Cena ${i + 1}/${rawScenes.length}: áudio de ${audioDur.toFixed(1)}s sincronizado (tempo exato da cena: ${sc.dur}s, termina 0.55s antes da transição)`);
         } else {
           onLog(`🎙️ Áudio da cena ${i + 1}/${rawScenes.length} sintetizado (${options.voice})`);
         }
       } else {
-        // Fallback to Web Speech API: guarantee duration for speech
-        const neededDur = estimateSpeechDuration(speechText);
-        sc.dur = Math.max(sc.dur, neededDur);
-        onLog(`Cena ${i + 1}: tempo da cena calibrado exatamente com a fala (${sc.dur}s).`);
+        // Fallback to Web Speech API: guarantee duration for speech based on character and word count
+        const timing = estimateSpeechDuration(speechText, sc.voice_at || 0.40);
+        sc.dur = timing.sceneDuration;
+        sc.audio_dur = timing.speechDuration;
+        sc.voice_at = timing.voiceAt;
+        sc.sub_at = timing.subAt;
+        onLog(`Cena ${i + 1}: tempo da cena calibrado com precisão (${timing.wordCount} palavras, ${timing.charCount} letras, fala: ${timing.speechDuration}s, cena: ${sc.dur}s).`);
       }
     }
 
